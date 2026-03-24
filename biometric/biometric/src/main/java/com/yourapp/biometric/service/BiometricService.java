@@ -1,10 +1,12 @@
 package com.yourapp.biometric.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yourapp.biometric.dto.PythonResponse;
 import com.yourapp.biometric.model.User;
 import com.yourapp.biometric.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
@@ -19,6 +21,7 @@ import java.util.Optional;
 
 @Service
 public class BiometricService {
+    private static final Logger log = LoggerFactory.getLogger(BiometricService.class);
 
     @Autowired
     private UserRepository userRepository;
@@ -26,114 +29,142 @@ public class BiometricService {
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // FIX: correct Python ML service endpoint
-    // Python's /api/ml/analyze accepts field name "file" and returns
-    // { success, is_real, spoof_reason, coherence_score, embedding }
-    private final String PYTHON_URL = "http://localhost:8000/api/ml/analyze";
+    private static final String PYTHON_ANALYZE_URL = "http://localhost:8000/api/ml/analyze";
+    private static final String PYTHON_FULL_URL    = "http://localhost:8000/api/ml/analyze-full";
+    private static final String LOGIN_CHALLENGES   = "blink,head_turn";
 
+    private static final double SIMILARITY_THRESHOLD = 0.75;
+
+    // ── Enrollment ─────────────────────────────────────────────────────────────
     public String enrollUser(String username, MultipartFile video) throws Exception {
-        // Check if user already enrolled
-        Optional<User> existing = userRepository.findByUsername(username);
+        log.info("Enrolling user: {}", username);
 
-        PythonResponse pyResponse = sendToPython(video);
+        JsonNode py = callPython(video, PYTHON_ANALYZE_URL, null);
 
-        // FIX: during enrollment, only block on actual spoof (screen replay).
-        // "Weak signal" is not a spoof — it just means poor camera conditions.
-        // We still have a valid embedding in that case.
-        if (!pyResponse.isSuccess()) {
-            throw new RuntimeException("ML service error: " + pyResponse.getSpoofReason());
+        if (!py.path("success").asBoolean(false)) {
+            throw new RuntimeException("Enrollment failed: " +
+                py.path("spoof_reason").asText("Unknown error"));
         }
 
-        if (pyResponse.getEmbedding() == null || pyResponse.getEmbedding().isEmpty()) {
+        JsonNode embNode = py.path("embedding");
+        if (embNode.isMissingNode() || !embNode.isArray() || embNode.size() == 0) {
             throw new RuntimeException("No face embedding returned. Please face the camera directly.");
         }
 
-        // Upsert: update embedding if user exists, otherwise create new record
-        User user = existing.orElse(new User());
+        User user = userRepository.findByUsername(username).orElse(new User());
         user.setUsername(username);
-        user.setFaceEmbedding(objectMapper.writeValueAsString(pyResponse.getEmbedding()));
-        userRepository.save(user);   // saves to Neon PostgreSQL via JPA
+        user.setFaceEmbedding(objectMapper.writeValueAsString(embNode));
+        userRepository.save(user);
 
-        return "User enrolled successfully! Embedding stored in database.";
+        log.info("Enrolled user {} with embedding size {}", username, embNode.size());
+        return "User enrolled successfully!";
     }
 
+    // ── Login ──────────────────────────────────────────────────────────────────
     public boolean authenticateUser(String username, MultipartFile video) throws Exception {
-        // Retrieve stored embedding from Neon PostgreSQL
+        log.info("Authenticating user: {}", username);
+
         Optional<User> userOpt = userRepository.findByUsername(username);
         if (userOpt.isEmpty()) {
-            throw new RuntimeException("User not found. Please enroll first.");
+            throw new RuntimeException("User '" + username + "' not found. Please enroll first.");
         }
 
-        PythonResponse pyResponse = sendToPython(video);
+        JsonNode py = callPython(video, PYTHON_FULL_URL, LOGIN_CHALLENGES);
 
-        if (!pyResponse.isSuccess()) {
-            throw new RuntimeException("ML service error: " + pyResponse.getSpoofReason());
+        // FIX: Respect the liveness decision from Python.
+        // The previous code only blocked on coherence > 0.98 and let everything
+        // else through to face matching. This meant a spoof that passed even
+        // one weak liveness layer would proceed to face matching.
+        // Now: if the ML service returns success=false for ANY reason other
+        // than an internal server error, we block — the Python pipeline
+        // already has its own forgiving logic internally.
+        boolean isReal = py.path("success").asBoolean(false);
+
+        if (!isReal) {
+            String reason    = py.path("spoof_reason").asText("Liveness check failed");
+            double coherence = py.path("coherence_score").asDouble(0.0);
+            log.warn("Liveness FAILED for {} — coherence={}, reason: {}", username, coherence, reason);
+            // Return false to trigger 401 in the controller
+            return false;
         }
 
-        // FIX: block on screen replay (coherence > 0.95), not weak signal
-        // Python already filters screen replay before returning success=true,
-        // but double-check here as well
-        if (!pyResponse.isReal() && pyResponse.getCoherenceScore() > 0.95) {
-            return false;  // definite spoof
-        }
+        // Log all three liveness layer results for debugging
+        double  coherence   = py.path("coherence_score").asDouble(0.0);
+        boolean chalPassed  = py.path("challenge_passed").asBoolean(false);
+        boolean bcgPassed   = py.path("bcg_passed").asBoolean(false);
+        double  bcgHr       = py.path("bcg_hr_bpm").asDouble(0.0);
+        double  rppgHr      = py.path("rppg_hr_bpm").asDouble(0.0);
 
-        if (pyResponse.getEmbedding() == null || pyResponse.getEmbedding().isEmpty()) {
+        log.info("Liveness PASSED — coherence:{}, challenge:{}, BCG:{} (BCG={}bpm, rPPG={}bpm)",
+                coherence, chalPassed, bcgPassed, bcgHr, rppgHr);
+
+        // ── Face matching ──────────────────────────────────────────────────────
+        JsonNode embNode = py.path("embedding");
+        if (embNode.isMissingNode() || !embNode.isArray() || embNode.size() == 0) {
             throw new RuntimeException("No face embedding returned from ML service.");
         }
 
-        // Compare current embedding against stored embedding from Neon
-        List<Double> storedEmbedding = objectMapper.readValue(
-                userOpt.get().getFaceEmbedding(), new TypeReference<>() {});
+        List<Double> stored  = objectMapper.readValue(
+            userOpt.get().getFaceEmbedding(), new TypeReference<>() {}
+        );
+        List<Double> current = objectMapper.readValue(
+            objectMapper.writeValueAsString(embNode), new TypeReference<>() {}
+        );
 
-        double similarity = calculateCosineSimilarity(storedEmbedding, pyResponse.getEmbedding());
-        return similarity > 0.75;
+        double similarity = cosineSim(stored, current);
+        log.info("Face similarity for {}: {} (threshold={})", username, similarity, SIMILARITY_THRESHOLD);
+
+        return similarity >= SIMILARITY_THRESHOLD;
     }
 
-    /**
-     * Sends video to Python ML service.
-     * Field name must be "file" — matches Python FastAPI endpoint parameter.
-     */
-    private PythonResponse sendToPython(MultipartFile video) throws Exception {
+    // ── HTTP helper ────────────────────────────────────────────────────────────
+    private JsonNode callPython(MultipartFile video, String url, String challenges) throws Exception {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.MULTIPART_FORM_DATA);
 
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-        body.add("file", video.getResource());  // "file" matches Python's File(...) param name
+        body.add("file", video.getResource());
+        if (challenges != null && !challenges.isBlank()) {
+            body.add("challenges", challenges);
+        }
 
-        HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+        HttpEntity<MultiValueMap<String, Object>> request = new HttpEntity<>(body, headers);
 
         try {
-            ResponseEntity<PythonResponse> response = restTemplate.postForEntity(
-                    PYTHON_URL, requestEntity, PythonResponse.class);
-
-            if (response.getBody() == null) {
-                throw new RuntimeException("Empty response from ML service");
-            }
-            return response.getBody();
-
+            ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
+            String responseBody = response.getBody();
+            if (responseBody == null)
+                throw new RuntimeException("Empty response from ML service at " + url);
+            return objectMapper.readTree(responseBody);
         } catch (HttpClientErrorException e) {
-            // Parse error body from Python so we get the real reason
-            String errorBody = e.getResponseBodyAsString();
             try {
-                PythonResponse errResp = objectMapper.readValue(errorBody, PythonResponse.class);
-                return errResp;
+                JsonNode errorJson = objectMapper.readTree(e.getResponseBodyAsString());
+                // For 401, Python already decided it's a spoof — pass that back
+                if (e.getStatusCode() == HttpStatus.UNAUTHORIZED) {
+                    log.warn("ML service returned 401 (spoof detected): {}",
+                        errorJson.path("spoof_reason").asText("Unknown"));
+                    return errorJson;  // success=false is already set in the body
+                }
+                throw new RuntimeException("ML service error (" + e.getStatusCode() + "): " +
+                    errorJson.path("spoof_reason").asText(e.getResponseBodyAsString()));
             } catch (Exception ignored) {
-                throw new RuntimeException("ML service error (" + e.getStatusCode() + "): " + errorBody);
+                throw new RuntimeException("ML service error (" + e.getStatusCode() + "): " +
+                    e.getResponseBodyAsString());
             }
         }
     }
 
-    private double calculateCosineSimilarity(List<Double> vectorA, List<Double> vectorB) {
-        if (vectorA == null || vectorB == null || vectorA.size() != vectorB.size()) {
+    // ── Cosine similarity ──────────────────────────────────────────────────────
+    private double cosineSim(List<Double> a, List<Double> b) {
+        if (a == null || b == null || a.size() != b.size() || a.isEmpty())
             return 0.0;
+
+        double dot = 0, na = 0, nb = 0;
+        for (int i = 0; i < a.size(); i++) {
+            dot += a.get(i) * b.get(i);
+            na  += a.get(i) * a.get(i);
+            nb  += b.get(i) * b.get(i);
         }
-        double dotProduct = 0.0, normA = 0.0, normB = 0.0;
-        for (int i = 0; i < vectorA.size(); i++) {
-            dotProduct += vectorA.get(i) * vectorB.get(i);
-            normA += Math.pow(vectorA.get(i), 2);
-            normB += Math.pow(vectorB.get(i), 2);
-        }
-        if (normA == 0 || normB == 0) return 0.0;
-        return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+        return (na == 0 || nb == 0) ? 0.0 : dot / (Math.sqrt(na) * Math.sqrt(nb));
     }
 }
