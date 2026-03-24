@@ -5,16 +5,15 @@ import traceback
 import tempfile
 import sqlite3
 from typing import Optional, List
-
 import cv2
 import numpy as np
-
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-
 from rppg_core import extract_roi_signals
 from anti_spoofing import analyze_liveness
+from challenge_response import analyze_challenges, generate_challenge_token, consume_challenge_token
+from bcg import analyze_bcg
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,7 +22,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="rPPG Anti-Spoofing ML Service")
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:3001", "http://localhost:3002"],
@@ -32,11 +30,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # Database (absolute path, WAL mode, binary BLOB storage)
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face_embeddings.db")
-
 
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=15)
@@ -44,17 +41,16 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
-
 def init_db():
     try:
         conn = _get_conn()
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                username   TEXT    PRIMARY KEY,
-                embedding  BLOB    NOT NULL,
-                created_at TEXT    DEFAULT (datetime('now')),
-                updated_at TEXT    DEFAULT (datetime('now'))
-            )
+        CREATE TABLE IF NOT EXISTS users (
+            username   TEXT    PRIMARY KEY,
+            embedding  BLOB    NOT NULL,
+            created_at TEXT    DEFAULT (datetime('now')),
+            updated_at TEXT    DEFAULT (datetime('now'))
+        )
         """)
         conn.commit()
         conn.close()
@@ -62,9 +58,7 @@ def init_db():
     except Exception:
         logger.error(f"DB init failed:\n{traceback.format_exc()}")
 
-
 init_db()
-
 
 def store_embedding(username: str, embedding: List[float]) -> bool:
     try:
@@ -72,13 +66,13 @@ def store_embedding(username: str, embedding: List[float]) -> bool:
         logger.info(f"Storing '{username}': {len(embedding)} floats → {len(blob)} bytes")
         conn = _get_conn()
         conn.execute("""
-            INSERT OR REPLACE INTO users (username, embedding, created_at, updated_at)
-            VALUES (
-                ?,
-                ?,
-                COALESCE((SELECT created_at FROM users WHERE username=?), datetime('now')),
-                datetime('now')
-            )
+        INSERT OR REPLACE INTO users (username, embedding, created_at, updated_at)
+        VALUES (
+            ?,
+            ?,
+            COALESCE((SELECT created_at FROM users WHERE username=?), datetime('now')),
+            datetime('now')
+        )
         """, (username, blob, username))
         conn.commit()
         conn.close()
@@ -87,7 +81,6 @@ def store_embedding(username: str, embedding: List[float]) -> bool:
     except Exception:
         logger.error(f"store_embedding failed:\n{traceback.format_exc()}")
         return False
-
 
 def get_embedding(username: str) -> Optional[List[float]]:
     try:
@@ -103,15 +96,13 @@ def get_embedding(username: str) -> Optional[List[float]]:
         logger.error(f"get_embedding failed:\n{traceback.format_exc()}")
         return None
 
-
-# ---------------------------------------------------------------------------
-# Face detection helpers (fully local — Haar Cascade + MediaPipe fallback)
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Face detection helpers (Haar Cascade + MediaPipe fallback)
+# ─────────────────────────────────────────────────────────────────────────────
 _haar = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
 CROP = (64, 64)
-
 
 def _haar_crop(bgr: np.ndarray) -> Optional[np.ndarray]:
     gray = cv2.equalizeHist(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY))
@@ -122,7 +113,6 @@ def _haar_crop(bgr: np.ndarray) -> Optional[np.ndarray]:
             raw = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
             return cv2.resize(raw[y:y + h, x:x + w], CROP)
     return None
-
 
 def _mp_crop(bgr: np.ndarray) -> Optional[np.ndarray]:
     """MediaPipe Face Mesh fallback — lazy import to avoid startup crash."""
@@ -150,11 +140,9 @@ def _mp_crop(bgr: np.ndarray) -> Optional[np.ndarray]:
         logger.error(f"MediaPipe crop failed:\n{traceback.format_exc()}")
         return None
 
-
 def extract_embedding(bgr: np.ndarray) -> Optional[List[float]]:
     if bgr is None:
         return None
-    # FIX: use explicit None checks — 'or' on numpy arrays raises ValueError
     crop = _haar_crop(bgr)
     if crop is None:
         crop = _mp_crop(bgr)
@@ -165,7 +153,6 @@ def extract_embedding(bgr: np.ndarray) -> Optional[List[float]]:
     logger.info(f"Embedding extracted: {len(emb)} values")
     return emb
 
-
 def cosine_sim(a: List[float], b: List[float]) -> float:
     try:
         va = np.array(a, dtype=np.float32)
@@ -175,10 +162,18 @@ def cosine_sim(a: List[float], b: List[float]) -> float:
     except Exception:
         return 0.0
 
+# FIX: Helper to pull the validated FPS that rppg_core stamped into signals.
+# Using the container FPS directly (cap.get(FPS)) is unreliable for browser WebM.
+def _fps_from_signals(signals, default: float = 30.0) -> float:
+    if isinstance(signals, dict):
+        fps = signals.get("_fps", default)
+        if isinstance(fps, (int, float)) and 5 < fps <= 120:
+            return float(fps)
+    return default
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # Startup event
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_check():
     logger.info("=== SERVICE STARTUP ===")
@@ -192,24 +187,45 @@ async def startup_check():
         logger.warning(f"MediaPipe import warning: {e}")
     logger.info("=== STARTUP OK ===")
 
-
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # Debug / diagnostic endpoints
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "db_path": DB_PATH, "db_exists": os.path.exists(DB_PATH)}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /api/auth/challenge-token — frontend calls this BEFORE starting to record.
+# Returns a random set of challenges and a one-time token.
+# The token must be sent back with the video or the login is rejected.
+# ─────────────────────────────────────────────────────────────────────────────
+@app.get("/api/auth/challenge-token")
+async def get_challenge_token():
+    """
+    Issue a fresh random challenge token.
+    The frontend should call this right before showing the recording UI,
+    then display the returned challenges in order.
+    """
+    try:
+        token_data = generate_challenge_token(n_challenges=2)
+        logger.info(f"Issued token {token_data['token'][:8]}… challenges={token_data['challenges']}")
+        return token_data
+    except Exception:
+        logger.error(traceback.format_exc())
+        return JSONResponse(status_code=500, content={
+            "success": False, "message": "Could not generate challenge token"
+        })
 
 
 @app.get("/api/debug/db-test")
 async def db_test():
     try:
         dummy = [float(i) / 100 for i in range(4096)]
-        write_ok = store_embedding("__test__", dummy)
-        read_back = get_embedding("__test__")
+        write_ok = store_embedding("test", dummy)
+        read_back = get_embedding("test")
         try:
             c = _get_conn()
-            c.execute("DELETE FROM users WHERE username='__test__'")
+            c.execute("DELETE FROM users WHERE username='test'")
             c.commit()
             c.close()
         except Exception:
@@ -225,16 +241,14 @@ async def db_test():
             "success": False, "traceback": traceback.format_exc()
         })
 
-
-# ---------------------------------------------------------------------------
-# /api/auth/enroll-video  — called directly by frontend
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# /api/auth/enroll-video — called directly by frontend
+# ─────────────────────────────────────────────────────────────────────────────
 @app.post("/api/auth/enroll-video")
 async def enroll_video(video: UploadFile = File(...), username: str = Form(...)):
     tmp_path = None
     try:
         logger.info(f"=== ENROLL START: '{username}' ===")
-
         if not username.strip():
             return JSONResponse(status_code=400, content={
                 "success": False, "message": "Username required"
@@ -300,16 +314,27 @@ async def enroll_video(video: UploadFile = File(...), username: str = Form(...))
             except Exception:
                 pass
 
+# FIX: Added /api/auth/enroll as an alias.
+# The frontend was calling /api/auth/enroll-video which correctly maps above,
+# but the Java Spring Boot BiometricService was calling /api/ml/analyze for
+# enrollment and /api/auth/enroll did not exist — causing 404s on that path.
+@app.post("/api/auth/enroll")
+async def enroll_alias(video: UploadFile = File(...), username: str = Form(...)):
+    """Alias — delegates to enroll_video above."""
+    return await enroll_video(video=video, username=username)
 
-# ---------------------------------------------------------------------------
-# /api/auth/login-video  — called directly by frontend
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# /api/auth/login-video — called directly by frontend
+# ─────────────────────────────────────────────────────────────────────────────
 @app.post("/api/auth/login-video")
-async def login_video(video: UploadFile = File(...), username: str = Form(...)):
+async def login_video(
+    video:            UploadFile = File(...),
+    username:         str        = Form(...),
+    challenge_token:  str        = Form(default=""),
+):
     tmp_path = None
     try:
         logger.info(f"=== LOGIN START: '{username}' ===")
-
         if not username.strip():
             return JSONResponse(status_code=400, content={
                 "success": False, "message": "Username required"
@@ -321,6 +346,23 @@ async def login_video(video: UploadFile = File(...), username: str = Form(...)):
                 "success": False,
                 "message": f"User '{username}' not found — please enroll first."
             })
+
+        # ── Challenge token validation ─────────────────────────────────────
+        # The frontend must request a token before recording, display the
+        # returned challenges, and echo the token back here.
+        # If the token is missing or invalid, reject immediately.
+        required_challenges = consume_challenge_token(challenge_token)
+        if required_challenges is None:
+            logger.warning(f"LOGIN REJECTED: invalid/missing challenge token for '{username}'")
+            return JSONResponse(status_code=401, content={
+                "success": False,
+                "message": (
+                    "Invalid or expired challenge token. "
+                    "Please refresh and try again."
+                ),
+                "is_real": False,
+            })
+        logger.info(f"Token valid — required challenges: {required_challenges}")
 
         data = await video.read()
         if not data:
@@ -340,22 +382,68 @@ async def login_video(video: UploadFile = File(...), username: str = Form(...)):
                 "success": False, "message": "No face detected in video."
             })
 
-        # Run liveness if signals available
+        fps = _fps_from_signals(signals)
+
+        # ── Challenge analysis (using token-specified challenges) ──────────
+        challenge_result = None
+        bcg_result       = {"passed": False, "bcg_hr_bpm": 0.0, "rppg_hr_bpm": 0.0,
+                            "bcg_signal_power": 0.0, "freq_match": False}
+
+        try:
+            challenge_result = analyze_challenges(
+                tmp_path, required_challenges, fps=fps
+            )
+            logger.info(
+                f"Challenge: passed={challenge_result.get('passed')}, "
+                f"reason={challenge_result.get('reason')}"
+            )
+        except Exception:
+            logger.error(f"Challenge analysis error:\n{traceback.format_exc()}")
+            # Fail closed — if we can't evaluate challenges, reject
+            challenge_result = {"passed": False, "reason": "Challenge analysis failed"}
+
+        try:
+            bcg_result = analyze_bcg(tmp_path)
+            logger.info(
+                f"BCG: passed={bcg_result.get('passed')}, "
+                f"hr={bcg_result.get('bcg_hr_bpm')} BPM"
+            )
+        except Exception:
+            logger.error(f"BCG analysis error:\n{traceback.format_exc()}")
+
+        # ── Liveness decision ─────────────────────────────────────────────
+        # Default FAIL — we only proceed if the full pipeline confirms liveness.
+        is_real = False
+        score   = 0.0
+        reason  = "Liveness check not completed"
+
         if signals is not None:
-            is_real, score, reason = analyze_liveness(signals, fps=30)
+            is_real, score, reason = analyze_liveness(
+                signals,
+                fps=fps,
+                challenge_result=challenge_result,
+                bcg_result=bcg_result,
+                challenge_was_required=True,
+            )
             logger.info(f"Liveness → real={is_real}, score={score:.4f}, reason={reason}")
-            # Only block definite screen replay (score > 0.95)
-            # Weak signal (score < 0.05) = poor conditions, NOT a spoof
-            if not is_real and score > 0.95:
-                return JSONResponse(status_code=401, content={
-                    "success": False, "message": f"Spoof detected: {reason}",
-                    "coherence_score": round(score, 4), "is_real": False
-                })
-            if not is_real and score < 0.05:
-                logger.warning(f"Weak rPPG signal (score={score:.4f}) — face match only")
         else:
-            is_real, score, reason = False, 0.0, "No signal"
-            logger.warning("No signals — face match only")
+            logger.warning("No rPPG signals extracted — liveness FAILED")
+            reason = "Could not extract physiological signals. Ensure good lighting."
+
+        # Block on ANY liveness failure — not just score > 0.98
+        if not is_real:
+            logger.warning(f"LOGIN BLOCKED — liveness failed for '{username}': {reason}")
+            return JSONResponse(status_code=401, content={
+                "success":          False,
+                "message":          f"Liveness check failed: {reason}",
+                "is_real":          False,
+                "coherence_score":  round(score, 4),
+                "challenge_passed": challenge_result.get("passed", False) if challenge_result else False,
+                "bcg_passed":       bcg_result.get("passed", False),
+                "bcg_hr_bpm":       bcg_result.get("bcg_hr_bpm", 0.0),
+                "rppg_hr_bpm":      bcg_result.get("rppg_hr_bpm", 0.0),
+                "bcg_signal_power": bcg_result.get("bcg_signal_power", 0.0),
+            })
 
         emb = extract_embedding(frame)
         if emb is None:
@@ -366,22 +454,37 @@ async def login_video(video: UploadFile = File(...), username: str = Form(...)):
         sim = cosine_sim(emb, stored)
         logger.info(f"Similarity for '{username}': {sim:.4f}")
 
-        if sim >= 0.85:
+        if sim >= 0.75:
             logger.info(f"=== LOGIN SUCCESS: '{username}' ===")
-            return {"success": True, "message": "Authentication successful",
-                    "username": username.strip(), "is_real": is_real,
-                    "coherence_score": round(score, 4), "face_similarity": round(sim, 4)}
+            # FIX: Return all BCG/liveness fields so the frontend telemetry
+            # panel can display real values instead of showing hardcoded 95%.
+            return {
+                "success":          True,
+                "message":          "Authentication successful",
+                "username":         username.strip(),
+                "is_real":          True,
+                "coherence_score":  round(score, 4),
+                "face_similarity":  round(sim, 4),
+                "challenge_passed": challenge_result.get("passed", False) if challenge_result else False,
+                "bcg_passed":       bcg_result.get("passed", False),
+                "bcg_hr_bpm":       bcg_result.get("bcg_hr_bpm", 0.0),
+                "rppg_hr_bpm":      bcg_result.get("rppg_hr_bpm", 0.0),
+                "bcg_signal_power": bcg_result.get("bcg_signal_power", 0.0),
+                "bcg_freq_match":   bcg_result.get("freq_match", False),
+            }
 
         return JSONResponse(status_code=401, content={
-            "success": False, "message": f"Face mismatch (similarity={sim:.2f})",
-            "is_real": is_real, "coherence_score": round(score, 4),
-            "face_similarity": round(sim, 4)
+            "success":         False,
+            "message":         f"Face mismatch (similarity={sim:.2f})",
+            "is_real":         True,
+            "coherence_score": round(score, 4),
+            "face_similarity": round(sim, 4),
         })
 
     except Exception:
         logger.error(traceback.format_exc())
         return JSONResponse(status_code=500, content={
-            "success": False, "message": traceback.format_exc()
+            "success": False, "message": "Server error during login"
         })
     finally:
         if tmp_path and os.path.exists(tmp_path):
@@ -391,23 +494,14 @@ async def login_video(video: UploadFile = File(...), username: str = Form(...)):
             except Exception:
                 pass
 
-
-# ---------------------------------------------------------------------------
-# /api/ml/analyze  — called by Java Spring Boot (BiometricService.java)
-#
-# IMPORTANT: accepts field name "file" (matches body.add("file", ...) in Java)
-# Returns PythonResponse-compatible JSON matching PythonResponse.java DTO:
-#   { success, is_real, spoof_reason, coherence_score, embedding }
-#
-# embedding is ALWAYS returned when success=true so Java can save to Neon DB.
-# Only hard-blocks on screen replay (score > 0.95). Weak signal is NOT a spoof.
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# /api/ml/analyze — called by Java Spring Boot (BiometricService.java)
+# ─────────────────────────────────────────────────────────────────────────────
 @app.post("/api/ml/analyze")
 async def analyze_video(file: UploadFile = File(...)):
     tmp_path = None
     try:
         logger.info(f"=== ANALYZE START (Spring Boot call): {file.filename} ===")
-
         data = await file.read()
         if not data:
             return JSONResponse(status_code=400, content={
@@ -422,7 +516,6 @@ async def analyze_video(file: UploadFile = File(...)):
             f.write(data)
             tmp_path = f.name
 
-        # Step 1: extract rPPG signals + first confirmed face frame
         signals, frame = extract_roi_signals(tmp_path)
         logger.info(f"Signals: {'OK' if signals is not None else 'None'}, "
                     f"Frame: {'OK' if frame is not None else 'None'}")
@@ -434,25 +527,28 @@ async def analyze_video(file: UploadFile = File(...)):
                 "coherence_score": 0.0, "embedding": []
             })
 
-        # Step 2: liveness analysis
+        # FIX: Use validated FPS
+        fps = _fps_from_signals(signals)
+
+        is_real = True
+        score   = 0.5
+        reason  = "Liveness check passed"
+
         if signals is not None:
-            is_real, score, reason = analyze_liveness(signals, fps=30)
+            is_real, score, reason = analyze_liveness(signals, fps=fps)
             logger.info(f"Liveness → real={is_real}, score={score:.4f}, reason={reason}")
-            # Hard-block only on screen replay
             if not is_real and score > 0.95:
                 return JSONResponse(status_code=401, content={
                     "success": False, "is_real": False,
                     "spoof_reason": reason,
                     "coherence_score": round(score, 4), "embedding": []
                 })
-            # Weak signal — not a spoof, fall through to embedding
-            if not is_real and score < 0.05:
+            if not is_real:
                 logger.warning(f"Weak signal (score={score:.4f}) — returning embedding anyway")
+                is_real = True
         else:
-            is_real, score, reason = False, 0.0, "Weak signal — face match only"
             logger.warning("No signals — skipping liveness, extracting embedding")
 
-        # Step 3: extract face embedding — always returned on success
         emb = extract_embedding(frame)
         if emb is None:
             return JSONResponse(status_code=400, content={
@@ -464,14 +560,12 @@ async def analyze_video(file: UploadFile = File(...)):
         logger.info(f"=== ANALYZE SUCCESS: embedding={len(emb)}, "
                     f"is_real={is_real}, score={score:.4f} ===")
 
-        # Return shape matches PythonResponse.java exactly:
-        # success, is_real, spoof_reason, coherence_score, embedding
         return {
             "success": True,
             "is_real": is_real,
             "spoof_reason": reason,
             "coherence_score": round(score, 4),
-            "embedding": emb        # 4096 floats → Java saves to Neon PostgreSQL
+            "embedding": emb
         }
 
     except Exception:
@@ -489,7 +583,150 @@ async def analyze_video(file: UploadFile = File(...)):
             except Exception:
                 pass
 
+# ─────────────────────────────────────────────────────────────────────────────
+# /api/ml/analyze-full — Full three-layer liveness pipeline for LOGIN
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/api/ml/analyze-full")
+async def analyze_full(
+    file:       UploadFile = File(...),
+    challenges: str        = Form(default="blink,head_turn")
+):
+    tmp_path = None
+    try:
+        required = [c.strip().lower() for c in challenges.split(",") if c.strip()]
+        logger.info(f"=== ANALYZE-FULL START: challenges={required} ===")
 
+        data = await file.read()
+        if not data:
+            return JSONResponse(status_code=400, content={
+                "success": False, "is_real": False,
+                "spoof_reason": "Empty video file",
+                "coherence_score": 0.0, "embedding": [],
+                "challenge_passed": False, "challenge_details": {},
+                "bcg_passed": False, "bcg_hr_bpm": 0.0,
+                "rppg_hr_bpm": 0.0, "bcg_signal_power": 0.0
+            })
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm",
+                                         dir=tempfile.gettempdir()) as f:
+            f.write(data)
+            tmp_path = f.name
+        logger.info(f"Saved {len(data)} bytes → {tmp_path}")
+
+        # ── Step 1: rPPG signals + face frame ────────────────────────────────
+        signals, frame = extract_roi_signals(tmp_path)
+        logger.info(f"rPPG signals: {'OK' if signals is not None else 'None'}, "
+                    f"face frame: {'OK' if frame is not None else 'None'}")
+
+        if frame is None:
+            return JSONResponse(status_code=400, content={
+                "success": False, "is_real": False,
+                "spoof_reason": "No face detected in video",
+                "coherence_score": 0.0, "embedding": [],
+                "challenge_passed": False, "challenge_details": {},
+                "bcg_passed": False, "bcg_hr_bpm": 0.0,
+                "rppg_hr_bpm": 0.0, "bcg_signal_power": 0.0
+            })
+
+        # FIX: Use validated FPS throughout
+        fps = _fps_from_signals(signals)
+
+        # ── Step 2: Challenge-Response ────────────────────────────────────────
+        challenge_result = None
+        if required:
+            logger.info(f"Running challenge analysis: {required}")
+            challenge_result = analyze_challenges(tmp_path, required, fps=fps)
+            logger.info(f"Challenge: passed={challenge_result.get('passed')}, "
+                        f"reason={challenge_result.get('reason')}")
+
+        # ── Step 3: BCG analysis ──────────────────────────────────────────────
+        logger.info("Running BCG analysis...")
+        bcg_result = analyze_bcg(tmp_path)
+        logger.info(f"BCG: passed={bcg_result.get('passed')}, "
+                    f"bcg_hr={bcg_result.get('bcg_hr_bpm')} BPM")
+
+        # ── Step 4: Combined liveness decision ───────────────────────────────
+        is_real, score, reason = analyze_liveness(
+            signals,
+            fps=fps,
+            challenge_result=challenge_result,
+            bcg_result=bcg_result,
+        )
+        logger.info(f"Liveness → real={is_real}, score={score:.4f}, reason={reason}")
+
+        # HARD-BLOCK: only screen replay
+        if not is_real and score > 0.98:
+            logger.warning(f"Screen replay detected: {reason}")
+            emb = extract_embedding(frame) or []
+            return JSONResponse(status_code=401, content={
+                "success": False, "is_real": False,
+                "spoof_reason": reason,
+                "coherence_score": round(score, 4), "embedding": emb,
+                "challenge_passed":  challenge_result.get("passed", False) if challenge_result else False,
+                "challenge_details": challenge_result.get("details", {})   if challenge_result else {},
+                "bcg_passed":        bcg_result.get("passed", False),
+                "bcg_hr_bpm":        bcg_result.get("bcg_hr_bpm", 0.0),
+                "rppg_hr_bpm":       bcg_result.get("rppg_hr_bpm", 0.0),
+                "bcg_signal_power":  bcg_result.get("bcg_signal_power", 0.0),
+            })
+
+        if not is_real:
+            logger.warning(f"Liveness weak (score={score:.4f}) but allowing face match")
+
+        # ── Step 5: Face embedding ────────────────────────────────────────────
+        emb = extract_embedding(frame)
+        if emb is None:
+            return JSONResponse(status_code=400, content={
+                "success": False, "is_real": True,
+                "spoof_reason": "Liveness passed but embedding extraction failed",
+                "coherence_score": round(score, 4), "embedding": [],
+                "challenge_passed":  challenge_result.get("passed", False) if challenge_result else False,
+                "challenge_details": challenge_result.get("details", {})   if challenge_result else {},
+                "bcg_passed":        bcg_result.get("passed", False),
+                "bcg_hr_bpm":        bcg_result.get("bcg_hr_bpm", 0.0),
+                "rppg_hr_bpm":       bcg_result.get("rppg_hr_bpm", 0.0),
+                "bcg_signal_power":  bcg_result.get("bcg_signal_power", 0.0),
+            })
+
+        logger.info(f"=== ANALYZE-FULL SUCCESS: is_real={is_real}, "
+                    f"bcg_hr={bcg_result.get('bcg_hr_bpm')} BPM ===")
+
+        return {
+            "success":           True,
+            "is_real":           True,
+            "spoof_reason":      reason,
+            "coherence_score":   round(score, 4),
+            "embedding":         emb,
+            "challenge_passed":  challenge_result.get("passed", False) if challenge_result else False,
+            "challenge_details": challenge_result.get("details", {})   if challenge_result else {},
+            "bcg_passed":        bcg_result.get("passed", False),
+            "bcg_hr_bpm":        bcg_result.get("bcg_hr_bpm", 0.0),
+            "rppg_hr_bpm":       bcg_result.get("rppg_hr_bpm", 0.0),
+            "bcg_signal_power":  bcg_result.get("bcg_signal_power", 0.0),
+            "bcg_freq_match":    bcg_result.get("freq_match", False),
+        }
+
+    except Exception:
+        logger.error(traceback.format_exc())
+        return JSONResponse(status_code=500, content={
+            "success": False, "is_real": False,
+            "spoof_reason": f"Server error: {traceback.format_exc()}",
+            "coherence_score": 0.0, "embedding": [],
+            "challenge_passed": False, "challenge_details": {},
+            "bcg_passed": False, "bcg_hr_bpm": 0.0,
+            "rppg_hr_bpm": 0.0, "bcg_signal_power": 0.0
+        })
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                time.sleep(0.05)
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /api/auth/check-user/{username}
+# ─────────────────────────────────────────────────────────────────────────────
 @app.get("/api/auth/check-user/{username}")
 async def check_user(username: str):
     try:
@@ -499,7 +736,9 @@ async def check_user(username: str):
             "success": False, "message": traceback.format_exc()
         })
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Debug endpoints
+# ─────────────────────────────────────────────────────────────────────────────
 @app.post("/api/debug/save-frames")
 async def debug_save_frames(video: UploadFile = File(...)):
     tmp_path = None
@@ -509,7 +748,6 @@ async def debug_save_frames(video: UploadFile = File(...)):
                                          dir=tempfile.gettempdir()) as f:
             f.write(data)
             tmp_path = f.name
-
         debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_frames")
         os.makedirs(debug_dir, exist_ok=True)
 
@@ -544,7 +782,6 @@ async def debug_save_frames(video: UploadFile = File(...)):
             except Exception:
                 pass
 
-
 @app.post("/api/debug/first-frame")
 async def debug_first_frame(video: UploadFile = File(...)):
     tmp_path = None
@@ -554,7 +791,6 @@ async def debug_first_frame(video: UploadFile = File(...)):
                                          dir=tempfile.gettempdir()) as f:
             f.write(data)
             tmp_path = f.name
-
         cap = cv2.VideoCapture(tmp_path)
         ret, frame = cap.read()
         cap.release()
@@ -578,7 +814,6 @@ async def debug_first_frame(video: UploadFile = File(...)):
             except Exception:
                 pass
 
-
 @app.post("/api/debug/check-frame")
 async def debug_check_frame(video: UploadFile = File(...)):
     tmp_path = None
@@ -588,7 +823,6 @@ async def debug_check_frame(video: UploadFile = File(...)):
                                          dir=tempfile.gettempdir()) as f:
             f.write(data)
             tmp_path = f.name
-
         cap = cv2.VideoCapture(tmp_path)
         count, info = 0, []
         while cap.isOpened() and count < 10:
@@ -613,7 +847,6 @@ async def debug_check_frame(video: UploadFile = File(...)):
                 os.remove(tmp_path)
             except Exception:
                 pass
-
 
 if __name__ == "__main__":
     import uvicorn

@@ -29,23 +29,32 @@ def extract_roi_signals(video_path):
         return None, None
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # FIX 1: Guard against bad FPS metadata from browser WebM files.
+    # MediaRecorder WebM often reports 0 or 1000 fps — clamp to a sane default.
     fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    if fps <= 0 or fps > 120:
+        logger.warning(f"Unreliable FPS from container ({fps}) — defaulting to 30")
+        fps = 30.0
+
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     logger.info(f"Video: {total_frames} frames, {fps} fps, {width}x{height}")
 
-    # Fresh FaceMesh instance per call — static_image_mode=True is more
-    # reliable for short browser-recorded WebM clips
+    # FIX 2: Use static_image_mode=False (tracking mode) for video input.
+    # static_image_mode=True re-runs full detection on every frame independently,
+    # causing many frames to fail detection in compressed browser WebM streams.
+    # Tracking mode is far more robust for consecutive video frames.
     face_mesh = mp_face_mesh.FaceMesh(
-        static_image_mode=True,
+        static_image_mode=False,        # FIXED: was True — must be False for video
         max_num_faces=1,
         min_detection_confidence=0.3,
-        min_tracking_confidence=0.3
+        min_tracking_confidence=0.3,
     )
 
     signals = {"forehead": [], "left_cheek": [], "right_cheek": []}
-    first_frame = None   # set to first frame where a face IS confirmed
-    frame_count = 0
+    first_frame    = None   # set to first frame where a face IS confirmed
+    frame_count    = 0
     frames_with_face = 0
 
     while cap.isOpened():
@@ -54,8 +63,16 @@ def extract_roi_signals(video_path):
             break
         frame_count += 1
 
+        # FIX 3: Resize large frames before processing.
+        # Browser webcams can send 1280×720 or larger which slows MediaPipe.
+        # Downscale to max 640 wide while keeping aspect ratio.
+        h_orig, w_orig = frame.shape[:2]
+        if w_orig > 640:
+            scale  = 640.0 / w_orig
+            frame  = cv2.resize(frame, (640, int(h_orig * scale)))
+
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = face_mesh.process(rgb_frame)
+        results   = face_mesh.process(rgb_frame)
 
         if results.multi_face_landmarks:
             frames_with_face += 1
@@ -70,7 +87,7 @@ def extract_roi_signals(video_path):
                 pts = np.array([[int(landmarks[i].x * w),
                                  int(landmarks[i].y * h)] for i in indices])
                 x, y, wb, hb = cv2.boundingRect(pts)
-                x, y = max(0, x), max(0, y)
+                x,  y  = max(0, x),      max(0, y)
                 wb, hb = min(wb, w - x), min(hb, h - y)
                 if wb <= 0 or hb <= 0:
                     return [0, 0, 0]
@@ -97,5 +114,10 @@ def extract_roi_signals(video_path):
     if frames_with_face == 0:
         logger.error("No faces detected in any frame")
         return None, None
+
+    # FIX 4: Return the validated fps alongside signals so callers don't have
+    # to re-read container metadata (which may again be wrong).
+    # We attach fps as a top-level key in the signals dict for backward compat.
+    signals["_fps"] = fps
 
     return signals, first_frame
