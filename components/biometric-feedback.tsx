@@ -10,7 +10,7 @@ interface BiometricFeedbackProps {
 export function BiometricFeedback({ result, message, onClose }: BiometricFeedbackProps) {
   if (result === 'success') {
     return (
-      <Alert className="bg-emerald-950 border-emerald-700">
+      <Alert className="rounded-2xl border-emerald-400/25 bg-emerald-500/10 text-emerald-50">
         <CheckCircle2 className="h-5 w-5 text-emerald-400" />
         <AlertDescription className="ml-2 text-emerald-100">
           {message}
@@ -27,7 +27,7 @@ export function BiometricFeedback({ result, message, onClose }: BiometricFeedbac
   
   if (result === 'fail') {
     return (
-      <Alert className="bg-red-950 border-red-700">
+      <Alert className="rounded-2xl border-red-400/25 bg-red-500/10 text-red-50">
         <XCircle className="h-5 w-5 text-red-400" />
         <AlertDescription className="ml-2 text-red-100">
           {message}

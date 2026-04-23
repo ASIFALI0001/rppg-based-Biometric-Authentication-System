@@ -2,7 +2,7 @@ import { BiometricAuth } from '@/components/biometric-auth';
 
 export default function Home() {
   return (
-    <main className="min-h-screen bg-background flex items-center justify-center p-4">
+    <main className="relative min-h-screen overflow-hidden bg-background px-4 py-10 sm:px-6 lg:px-8">
       <BiometricAuth />
     </main>
   );

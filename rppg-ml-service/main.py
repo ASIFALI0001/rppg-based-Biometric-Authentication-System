@@ -589,11 +589,24 @@ async def analyze_video(file: UploadFile = File(...)):
 @app.post("/api/ml/analyze-full")
 async def analyze_full(
     file:       UploadFile = File(...),
-    challenges: str        = Form(default="blink,head_turn")
+    challenges: str        = Form(default="blink,head_turn"),
+    challenge_token: str   = Form(default="")
 ):
     tmp_path = None
     try:
         required = [c.strip().lower() for c in challenges.split(",") if c.strip()]
+        if challenge_token.strip():
+            token_required = consume_challenge_token(challenge_token.strip())
+            if token_required is None:
+                return JSONResponse(status_code=401, content={
+                    "success": False, "is_real": False,
+                    "spoof_reason": "Invalid or expired challenge token",
+                    "coherence_score": 0.0, "embedding": [],
+                    "challenge_passed": False, "challenge_details": {},
+                    "bcg_passed": False, "bcg_hr_bpm": 0.0,
+                    "rppg_hr_bpm": 0.0, "bcg_signal_power": 0.0
+                })
+            required = token_required
         logger.info(f"=== ANALYZE-FULL START: challenges={required} ===")
 
         data = await file.read()

@@ -77,35 +77,35 @@ export function BiometricTelemetry({ isScanning, bcgResult }: BiometricTelemetry
     && (bcgResult!.challenge_passed === true || bcgResult!.challenge_passed === false);
 
   return (
-    <div className="bg-card border border-border rounded-lg p-4 w-full font-mono text-sm space-y-3">
+    <div className="w-full space-y-4 rounded-[28px] border border-slate-700/70 bg-slate-950/85 p-5 font-mono text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
 
       {/* ── Row 1: Heart Rate (BCG + rPPG) ── */}
       {(hasBcgData || isScanning) && (
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <p className="text-muted-foreground text-xs uppercase tracking-wider mb-1">
+            <p className="mb-1 text-xs uppercase tracking-wider text-slate-400">
               BCG Heart Rate
             </p>
-            <p className={`text-lg font-semibold ${freqMatchColor}`}>
+            <p className={`text-xl font-semibold ${freqMatchColor}`}>
               {displayHR != null && displayHR > 0 ? `${Math.round(displayHR)} BPM` : '-- BPM'}
             </p>
             {showReal && bcgResult!.freq_match && hasBcgData && (
-              <p className="text-[10px] text-emerald-500 mt-0.5 flex items-center">
+              <p className="mt-1 flex items-center text-[10px] text-emerald-400">
                 <CheckCircle className="h-3 w-3 mr-1" /> matches rPPG
               </p>
             )}
             {showReal && !bcgResult!.freq_match && rppgHR != null && rppgHR > 0 && hasBcgData && (
-              <p className="text-[10px] text-amber-400 mt-0.5 flex items-center">
+              <p className="mt-1 flex items-center text-[10px] text-amber-300">
                 <AlertCircle className="h-3 w-3 mr-1" /> rPPG: {Math.round(rppgHR)} BPM
               </p>
             )}
           </div>
 
           <div>
-            <p className="text-muted-foreground text-xs uppercase tracking-wider mb-1">
+            <p className="mb-1 text-xs uppercase tracking-wider text-slate-400">
               BCG Signal Power
             </p>
-            <p className="text-lg font-semibold text-accent">
+            <p className="text-xl font-semibold text-cyan-200">
               {displayPow != null && displayPow > 0
                 ? displayPow < 0.0001
                   ? displayPow.toExponential(2)
@@ -113,8 +113,8 @@ export function BiometricTelemetry({ isScanning, bcgResult }: BiometricTelemetry
                 : '--'}
             </p>
             {showReal && hasBcgData && (
-              <p className={`text-[10px] mt-0.5 flex items-center ${
-                bcgResult!.bcg_passed ? 'text-emerald-500' : 'text-amber-500'
+              <p className={`mt-1 flex items-center text-[10px] ${
+                bcgResult!.bcg_passed ? 'text-emerald-400' : 'text-amber-300'
               }`}>
                 {bcgResult!.bcg_passed
                   ? <><CheckCircle className="h-3 w-3 mr-1" /> heartbeat detected</>
@@ -127,32 +127,32 @@ export function BiometricTelemetry({ isScanning, bcgResult }: BiometricTelemetry
 
       {/* Message if BCG attempted but no data */}
       {showReal && !hasBcgData && !isScanning && (
-        <div className="text-amber-500 text-xs flex items-center justify-center py-2 border-b border-border">
+        <div className="flex items-center justify-center border-b border-slate-700/70 py-2 text-xs text-amber-300">
           <AlertCircle className="h-4 w-4 mr-2" />
           BCG requires steady head position — try holding still
         </div>
       )}
 
       {/* ── Row 2: Liveness layers ── */}
-      <div className="grid grid-cols-3 gap-3 border-t border-border pt-3">
+      <div className="grid grid-cols-3 gap-4 border-t border-slate-700/70 pt-4">
 
         {/* rPPG coherence */}
         <div>
-          <p className="text-muted-foreground text-xs uppercase tracking-wider mb-1">
+          <p className="mb-1 text-xs uppercase tracking-wider text-slate-400">
             rPPG
           </p>
-          <p className={`text-sm font-semibold ${
+          <p className={`text-base font-semibold ${
             showReal
               ? bcgResult!.coherence_score >= 0.1 && bcgResult!.coherence_score <= 0.95
                 ? 'text-emerald-400' : 'text-amber-400'
-              : 'text-foreground'
+              : 'text-slate-200'
           }`}>
             {showReal
               ? `${(bcgResult!.coherence_score * 100).toFixed(0)}%`
               : isScanning ? '...' : '--%'}
           </p>
           {showReal && bcgResult!.coherence_score < 0.1 && (
-            <p className="text-[10px] text-amber-400 mt-0.5 flex items-center">
+            <p className="mt-1 flex items-center text-[10px] text-amber-300">
               <AlertCircle className="h-3 w-3 mr-1" /> low signal
             </p>
           )}
@@ -160,20 +160,20 @@ export function BiometricTelemetry({ isScanning, bcgResult }: BiometricTelemetry
 
         {/* Challenge */}
         <div>
-          <p className="text-muted-foreground text-xs uppercase tracking-wider mb-1">
+          <p className="mb-1 text-xs uppercase tracking-wider text-slate-400">
             Challenge
           </p>
-          <p className={`text-sm font-semibold ${
+          <p className={`text-base font-semibold ${
             showReal && challengeAttempted
               ? bcgResult!.challenge_passed ? 'text-emerald-400' : 'text-amber-400'
-              : 'text-foreground'
+              : 'text-slate-200'
           }`}>
             {showReal && challengeAttempted
               ? bcgResult!.challenge_passed ? '✓ Pass' : '○ Partial'
               : isScanning ? '...' : '—'}
           </p>
           {showReal && challengeAttempted && !bcgResult!.challenge_passed && (
-            <p className="text-[10px] text-amber-400 mt-0.5 flex items-center">
+            <p className="mt-1 flex items-center text-[10px] text-amber-300">
               <AlertCircle className="h-3 w-3 mr-1" /> blink / turn head
             </p>
           )}
@@ -181,18 +181,18 @@ export function BiometricTelemetry({ isScanning, bcgResult }: BiometricTelemetry
 
         {/* Spoof probability — FIX: only shown when actually suspicious */}
         <div>
-          <p className="text-muted-foreground text-xs uppercase tracking-wider mb-1">
+          <p className="mb-1 text-xs uppercase tracking-wider text-slate-400">
             Spoof Prob.
           </p>
-          <p className={`text-sm font-semibold ${
+          <p className={`text-base font-semibold ${
             displaySpoof != null && displaySpoof > 50
               ? 'text-destructive'
-              : 'text-muted-foreground'
+              : 'text-slate-300'
           }`}>
             {displaySpoof != null && displaySpoof > 0 ? `${displaySpoof}%` : '—'}
           </p>
           {showReal && displaySpoof != null && displaySpoof > 50 && (
-            <p className="text-[10px] text-destructive mt-0.5 flex items-center">
+            <p className="mt-1 flex items-center text-[10px] text-red-300">
               <XCircle className="h-3 w-3 mr-1" /> possible spoof
             </p>
           )}
@@ -201,7 +201,7 @@ export function BiometricTelemetry({ isScanning, bcgResult }: BiometricTelemetry
 
       {/* Summary when verified */}
       {showReal && (bcgResult!.bcg_passed || bcgResult!.challenge_passed || bcgResult!.coherence_score > 0.1) && (
-        <div className="text-emerald-500 text-xs flex items-center justify-center pt-2 border-t border-border">
+        <div className="flex items-center justify-center border-t border-slate-700/70 pt-3 text-xs text-emerald-300">
           <CheckCircle className="h-4 w-4 mr-2" />
           Liveness verified
         </div>

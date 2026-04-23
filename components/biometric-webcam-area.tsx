@@ -40,25 +40,28 @@ export default function BiometricWebcamArea({ videoRef, status, setStatus }: Web
   }, [videoRef, setStatus]);
 
   return (
-    <div className="relative w-full aspect-video bg-zinc-900 rounded-lg overflow-hidden border-2 border-zinc-800">
+    <div className="relative w-full aspect-video overflow-hidden rounded-[28px] border border-slate-700/70 bg-slate-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_12px_50px_rgba(0,0,0,0.35)]">
       {/* The actual video feed */}
       <video
         ref={videoRef as any}
         autoPlay
         playsInline
         muted
-        className="w-full h-full object-cover scale-x-[-1]" 
+        className="h-full w-full scale-x-[-1] object-cover"
         /* scale-x-[-1] mirrors the video so it feels like a mirror */
       />
-      
+
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(45,212,191,0.08),transparent_35%),linear-gradient(180deg,transparent_0%,rgba(3,7,18,0.28)_100%)]" />
+      <div className="scan-animation absolute left-0 right-0 h-px bg-gradient-to-r from-transparent via-emerald-300 to-transparent shadow-[0_0_18px_rgba(110,231,183,0.95)]" />
+
       {/* Dashed alignment box overlay */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-        <div className="w-48 h-64 border-2 border-dashed border-zinc-500 rounded-full opacity-50" />
+        <div className="h-64 w-48 rounded-full border border-dashed border-emerald-300/45 shadow-[0_0_60px_rgba(45,212,191,0.1)]" />
       </div>
 
       {/* Status Text Overlay */}
       <div className="absolute bottom-4 left-0 right-0 text-center pointer-events-none">
-        <span className="bg-black/70 text-emerald-400 text-sm px-3 py-1 rounded-full font-mono">
+        <span className="rounded-full border border-emerald-300/20 bg-slate-950/92 px-4 py-2 font-mono text-sm text-emerald-300 backdrop-blur-md">
           {status}
         </span>
       </div>

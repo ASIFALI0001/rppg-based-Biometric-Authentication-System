@@ -1,74 +1,73 @@
 'use client';
-import { useState, useRef } from 'react';
+
+import { useRef, useState } from 'react';
+import { ArrowRight, Radar, ScanFace, Shield, Sparkles } from 'lucide-react';
+
 import BiometricWebcamArea from './biometric-webcam-area';
 import { BiometricTelemetry } from './biometric-telemetry';
 import BiometricControls from './biometric-controls';
 import { BiometricFeedback } from './biometric-feedback';
+import { BiometricHeader } from './biometric-header';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
 const ENROLL_DURATION = 5000;
 
-// Human-readable labels and timing for each challenge type
 const CHALLENGE_META: Record<string, { label: string; duration: number }> = {
-  blink:     { label: "👁  Blink your eyes clearly",  duration: 3000 },
-  head_turn: { label: "↩↪  Turn head LEFT then RIGHT", duration: 4000 },
-  smile:     { label: "😊  Smile broadly",             duration: 3000 },
-  look_up:   { label: "⬆️  Look UP briefly",            duration: 3000 },
+  blink: { label: 'Blink your eyes clearly', duration: 3000 },
+  head_turn: { label: 'Turn head left then right', duration: 4000 },
+  smile: { label: 'Smile broadly', duration: 3000 },
+  look_up: { label: 'Look up briefly', duration: 3000 },
 };
 
-// Build the step sequence dynamically from the server-issued challenge list.
-// Always start with a "hold still" warm-up and end with a BCG capture.
 function buildSteps(challenges: string[]) {
   return [
-    { label: "Hold still — scanning face...", duration: 2000 },
+    { label: 'Hold still - scanning face...', duration: 2000 },
     ...challenges.map((c) => CHALLENGE_META[c] ?? { label: c, duration: 3000 }),
-    { label: "✓  Hold still — BCG capture...", duration: 2000 },
+    { label: 'Hold still - BCG capture...', duration: 2000 },
   ];
 }
 
 type BcgResult = {
-  bcg_hr_bpm:       number;
-  rppg_hr_bpm:      number;
+  bcg_hr_bpm: number;
+  rppg_hr_bpm: number;
   bcg_signal_power: number;
-  bcg_passed:       boolean;
-  freq_match:       boolean;
-  coherence_score:  number;
+  bcg_passed: boolean;
+  freq_match: boolean;
+  coherence_score: number;
   challenge_passed: boolean;
 };
 
 export function BiometricAuth() {
-  const videoRef      = useRef<HTMLVideoElement>(null);
-  const recorderRef   = useRef<MediaRecorder | null>(null);
-  const chunksRef     = useRef<BlobPart[]>([]);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<BlobPart[]>([]);
   const stepTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
-  const [status,           setStatus]           = useState("Initializing camera...");
-  const [isScanning,       setIsScanning]       = useState(false);
-  const [scanResult,       setScanResult]       = useState<"success" | "fail" | null>(null);
-  const [username,         setUsername]         = useState("");
-  const [usernameError,    setUsernameError]    = useState("");
-  const [challengeStep,    setChallengeStep]    = useState<string | null>(null);
-  const [bcgResult,        setBcgResult]        = useState<BcgResult | null>(null);
-  // Pending challenges shown to user before recording starts
+  const [status, setStatus] = useState('Initializing camera...');
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanResult, setScanResult] = useState<'success' | 'fail' | null>(null);
+  const [username, setUsername] = useState('');
+  const [usernameError, setUsernameError] = useState('');
+  const [challengeStep, setChallengeStep] = useState<string | null>(null);
+  const [bcgResult, setBcgResult] = useState<BcgResult | null>(null);
   const [pendingChallenges, setPendingChallenges] = useState<string[] | null>(null);
 
-  // Token issued by the server for this login session
-  const challengeTokenRef   = useRef<string>("");
+  const challengeTokenRef = useRef<string>('');
   const activeChallengesRef = useRef<string[]>([]);
 
-  // ── Challenge instruction ticker ─────────────────────────────────────────
   const runChallengeInstructions = (challenges: string[]) => {
     const steps = buildSteps(challenges);
     let elapsed = 0;
     setChallengeStep(steps[0].label);
 
     steps.forEach((step) => {
-      const t = setTimeout(() => {
+      const timer = setTimeout(() => {
         setChallengeStep(step.label);
         setStatus(step.label);
       }, elapsed);
-      stepTimersRef.current.push(t);
+
+      stepTimersRef.current.push(timer);
       elapsed += step.duration;
     });
   };
@@ -79,19 +78,18 @@ export function BiometricAuth() {
     setChallengeStep(null);
   };
 
-  // ── Fetch a random challenge token from the server ────────────────────────
   const fetchChallengeToken = async (): Promise<boolean> => {
     try {
-      setStatus("Generating random challenges...");
-      const res  = await fetch("http://localhost:8000/api/auth/challenge-token");
+      setStatus('Generating random challenges...');
+      const res = await fetch('/api/challenge');
       const data = await res.json();
 
       if (!data.token || !data.challenges) {
-        setStatus("Failed to get challenge token — try again.");
+        setStatus('Failed to get challenge token - try again.');
         return false;
       }
 
-      challengeTokenRef.current   = data.token;
+      challengeTokenRef.current = data.token;
       activeChallengesRef.current = data.challenges;
       setPendingChallenges(data.challenges);
       return true;
@@ -101,22 +99,23 @@ export function BiometricAuth() {
     }
   };
 
-  // ── Start recording ───────────────────────────────────────────────────────
-  const handleStartScan = async (action: "enroll" | "login") => {
+  const handleStartScan = async (action: 'enroll' | 'login') => {
     if (!username.trim()) {
-      setUsernameError("Please enter a username");
+      setUsernameError('Please enter a username');
       return;
     }
-    setUsernameError("");
 
-    if (!videoRef.current?.srcObject) return;
+    setUsernameError('');
 
-    // For login: fetch a random challenge token first.
-    // The token determines which challenges the user must perform.
-    // A pre-recorded video cannot know these challenges in advance.
-    if (action === "login") {
+    if (!videoRef.current?.srcObject) {
+      return;
+    }
+
+    if (action === 'login') {
       const ok = await fetchChallengeToken();
-      if (!ok) return;
+      if (!ok) {
+        return;
+      }
     }
 
     setIsScanning(true);
@@ -125,75 +124,75 @@ export function BiometricAuth() {
     setPendingChallenges(null);
     chunksRef.current = [];
 
-    if (action === "enroll") {
-      setStatus("Hold still — enrolling face (5s)...");
+    if (action === 'enroll') {
+      setStatus('Hold still - enrolling face (5s)...');
     } else {
-      setStatus("Preparing...");
+      setStatus('Preparing...');
       runChallengeInstructions(activeChallengesRef.current);
     }
 
-    const steps    = action === "login" ? buildSteps(activeChallengesRef.current) : [];
-    const duration = action === "login"
-      ? steps.reduce((s, c) => s + c.duration, 0)
-      : ENROLL_DURATION;
+    const steps = action === 'login' ? buildSteps(activeChallengesRef.current) : [];
+    const duration =
+      action === 'login'
+        ? steps.reduce((sum, current) => sum + current.duration, 0)
+        : ENROLL_DURATION;
 
-    const stream   = videoRef.current.srcObject as MediaStream;
-    const recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+    const stream = videoRef.current.srcObject as MediaStream;
+    const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
     recorderRef.current = recorder;
 
-    recorder.ondataavailable = (e) => {
-      if (e.data?.size > 0) chunksRef.current.push(e.data);
+    recorder.ondataavailable = (event) => {
+      if (event.data?.size > 0) {
+        chunksRef.current.push(event.data);
+      }
     };
 
     recorder.onstop = () => {
       setIsScanning(false);
       clearTimers();
-      setStatus("Analysing rPPG + Challenges + BCG...");
-      const blob = new Blob(chunksRef.current, { type: "video/webm" });
+      setStatus('Analysing rPPG + challenges + BCG...');
+      const blob = new Blob(chunksRef.current, { type: 'video/webm' });
       sendToBackend(blob, action);
     };
 
     recorder.start();
+
     setTimeout(() => {
-      if (recorder.state === "recording") recorder.stop();
+      if (recorder.state === 'recording') {
+        recorder.stop();
+      }
     }, duration);
   };
 
-  // ── Send to backend ───────────────────────────────────────────────────────
-  const sendToBackend = async (blob: Blob, action: "enroll" | "login") => {
+  const sendToBackend = async (blob: Blob, action: 'enroll' | 'login') => {
     const formData = new FormData();
-    formData.append("video", blob, "rppg_sample.webm");
-    formData.append("username", username.trim());
+    formData.append('video', blob, 'rppg_sample.webm');
+    formData.append('username', username.trim());
 
-    // For login: always send the challenge token so the backend can verify
-    // that the video corresponds to the specific challenges that were issued.
-    if (action === "login") {
-      formData.append("challenge_token", challengeTokenRef.current);
+    if (action === 'login') {
+      formData.append('challenge_token', challengeTokenRef.current);
     }
 
     try {
-      const endpoint = action === "enroll"
-        ? "http://localhost:8000/api/auth/enroll-video"
-        : "http://localhost:8000/api/auth/login-video";
-
-      const res  = await fetch(endpoint, { method: "POST", body: formData });
+      const endpoint = action === 'enroll' ? '/api/enroll' : '/api/login';
+      const res = await fetch(endpoint, { method: 'POST', body: formData });
       const data = await res.json().catch(async () => {
-        const txt = await res.text();
-        throw new Error(`Non-JSON response (${res.status}): ${txt}`);
+        const text = await res.text();
+        throw new Error(`Non-JSON response (${res.status}): ${text}`);
       });
 
       if (data.success) {
-        setScanResult("success");
+        setScanResult('success');
 
-        if (action === "login") {
+        if (action === 'login') {
           setBcgResult({
-            bcg_hr_bpm:       data.bcg_hr_bpm       ?? 0,
-            rppg_hr_bpm:      data.rppg_hr_bpm       ?? 0,
-            bcg_signal_power: data.bcg_signal_power  ?? 0,
-            bcg_passed:       data.bcg_passed        ?? false,
-            freq_match:       data.bcg_freq_match    ?? false,
-            coherence_score:  data.coherence_score   ?? 0,
-            challenge_passed: data.challenge_passed  ?? false,
+            bcg_hr_bpm: data.bcg_hr_bpm ?? 0,
+            rppg_hr_bpm: data.rppg_hr_bpm ?? 0,
+            bcg_signal_power: data.bcg_signal_power ?? 0,
+            bcg_passed: data.bcg_passed ?? false,
+            freq_match: data.bcg_freq_match ?? false,
+            coherence_score: data.coherence_score ?? 0,
+            challenge_passed: data.challenge_passed ?? false,
           });
 
           const bcgInfo = data.bcg_hr_bpm ? ` | BCG: ${data.bcg_hr_bpm} BPM` : '';
@@ -202,94 +201,157 @@ export function BiometricAuth() {
           setStatus(`Enrollment successful for ${username}. Face data stored.`);
         }
       } else {
-        setScanResult("fail");
-        setStatus(data.message || data.spoof_reason || "Access Denied");
+        setScanResult('fail');
+        setStatus(data.message || data.spoof_reason || 'Access denied');
       }
-
     } catch (err: any) {
-      console.error("Backend error:", err);
+      console.error('Backend error:', err);
       setStatus(`Error: ${err.message}`);
-      setScanResult("fail");
+      setScanResult('fail');
     }
   };
 
   return (
-    <div className="space-y-6">
-      {/* Username */}
-      <div className="space-y-2">
-        <Label htmlFor="username">Username</Label>
-        <Input
-          id="username"
-          type="text"
-          placeholder="Enter your username"
-          value={username}
-          onChange={(e) => {
-            setUsername(e.target.value);
-            setUsernameError("");
-          }}
-          disabled={isScanning}
-          className={usernameError ? "border-red-500" : ""}
-        />
-        {usernameError && (
-          <p className="text-sm text-red-500">{usernameError}</p>
-        )}
-      </div>
+    <div className="mx-auto grid w-full max-w-7xl gap-8 lg:grid-cols-[1.08fr_0.92fr]">
+      <section className="glass-panel tech-grid relative overflow-hidden rounded-[32px] border border-slate-700/70 p-6 shadow-[0_30px_120px_rgba(0,0,0,0.45)] sm:p-8">
+        <div className="pointer-events-none absolute -left-16 top-8 h-40 w-40 rounded-full bg-emerald-400/10 blur-3xl" />
+        <div className="pointer-events-none absolute -right-12 bottom-0 h-48 w-48 rounded-full bg-cyan-400/10 blur-3xl" />
 
-      <BiometricWebcamArea
-        videoRef={videoRef}
-        status={status}
-        setStatus={setStatus}
-      />
+        <div className="relative space-y-6">
+          <BiometricHeader />
 
-      {/* Pre-scan challenge preview — shown after token fetch, before recording */}
-      {pendingChallenges && !isScanning && (
-        <div className="w-full bg-blue-950 border border-blue-700 rounded-lg px-4 py-3">
-          <p className="text-blue-300 font-mono text-xs font-semibold mb-2 uppercase tracking-wider">
-            🎲 Random Challenges Assigned
-          </p>
-          <ol className="list-decimal list-inside space-y-1">
-            {pendingChallenges.map((c) => (
-              <li key={c} className="text-blue-100 text-sm font-mono">
-                {CHALLENGE_META[c]?.label ?? c}
-              </li>
-            ))}
-          </ol>
-          <p className="text-xs text-blue-400 mt-2">
-            Recording will start when you click Login. Complete all steps in order.
-          </p>
+          <div className="flex flex-wrap gap-3">
+            <div className="rounded-full border border-emerald-400/25 bg-emerald-400/12 px-4 py-2 text-xs font-medium uppercase tracking-[0.22em] text-emerald-200">
+              Secure onboarding
+            </div>
+            <div className="rounded-full border border-cyan-400/25 bg-cyan-400/12 px-4 py-2 text-xs font-medium uppercase tracking-[0.22em] text-cyan-100">
+              Replay-resistant auth
+            </div>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="rounded-2xl border border-slate-700/70 bg-slate-950/70 p-4">
+              <div className="mb-2 flex items-center gap-2 text-emerald-300">
+                <Radar className="h-4 w-4" />
+                <span className="text-xs uppercase tracking-[0.2em]">Signal Layer</span>
+              </div>
+              <p className="text-sm leading-6 text-slate-200">Captures rPPG coherence across facial regions in real time.</p>
+            </div>
+            <div className="rounded-2xl border border-slate-700/70 bg-slate-950/70 p-4">
+              <div className="mb-2 flex items-center gap-2 text-cyan-200">
+                <Sparkles className="h-4 w-4" />
+                <span className="text-xs uppercase tracking-[0.2em]">Challenge Layer</span>
+              </div>
+              <p className="text-sm leading-6 text-slate-200">Injects randomized prompts to reject prerecorded attacks.</p>
+            </div>
+            <div className="rounded-2xl border border-slate-700/70 bg-slate-950/70 p-4">
+              <div className="mb-2 flex items-center gap-2 text-white">
+                <Shield className="h-4 w-4 text-emerald-300" />
+                <span className="text-xs uppercase tracking-[0.2em]">Identity Layer</span>
+              </div>
+              <p className="text-sm leading-6 text-slate-200">Matches live embeddings against enrolled biometric profiles.</p>
+            </div>
+          </div>
         </div>
-      )}
+      </section>
 
-      {/* Live challenge step banner */}
-      {isScanning && challengeStep && (
-        <div className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-4 py-3 text-center">
-          <p className="text-emerald-400 font-mono text-sm font-semibold animate-pulse">
-            {challengeStep}
-          </p>
-          <p className="text-xs text-zinc-400 mt-1">
-            Follow the prompts — camera is recording rPPG, challenges & BCG
-          </p>
+      <section className="glass-panel animate-float-slow relative overflow-hidden rounded-[32px] border border-slate-700/70 p-5 shadow-[0_25px_90px_rgba(0,0,0,0.42)] sm:p-6">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(45,212,191,0.05),transparent_30%)]" />
+
+        <div className="relative space-y-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.26em] text-emerald-300/80">
+                <ScanFace className="h-3.5 w-3.5" />
+                VitalSign ID Console
+              </div>
+              <h2 className="text-2xl font-semibold text-white">Authenticate with live cardiovascular evidence</h2>
+            </div>
+            <div className="rounded-2xl border border-slate-700/70 bg-slate-950/80 px-3 py-2 text-right">
+              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Mode</div>
+              <div className="text-sm font-medium text-emerald-300">Face + rPPG</div>
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-slate-700/70 bg-slate-950/80 p-4 sm:p-5">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <Label htmlFor="username" className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-300">
+                  Identity label
+                </Label>
+                <p className="mt-1 text-xs text-slate-400">Use the same username for enrollment and authentication.</p>
+              </div>
+              <ArrowRight className="mt-1 h-4 w-4 text-emerald-300/80" />
+            </div>
+
+            <Input
+              id="username"
+              type="text"
+              placeholder="Enter your username"
+              value={username}
+              onChange={(e) => {
+                setUsername(e.target.value);
+                setUsernameError('');
+              }}
+              disabled={isScanning}
+              className={`h-12 rounded-2xl border-slate-700 bg-slate-900/95 text-base text-white placeholder:text-slate-500 ${usernameError ? 'border-red-500' : ''}`}
+            />
+
+            {usernameError && <p className="mt-2 text-sm text-red-400">{usernameError}</p>}
+          </div>
+
+          <BiometricWebcamArea videoRef={videoRef} status={status} setStatus={setStatus} />
+
+          {pendingChallenges && !isScanning && (
+            <div className="rounded-3xl border border-cyan-400/25 bg-slate-950/90 px-4 py-4">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.22em] text-cyan-200">
+                Randomized liveness sequence
+              </p>
+              <ol className="space-y-2">
+                {pendingChallenges.map((challenge, index) => (
+                  <li key={challenge} className="flex items-center gap-3 text-sm text-cyan-50">
+                    <span className="flex h-6 w-6 items-center justify-center rounded-full border border-cyan-300/30 bg-cyan-300/15 text-[11px] font-semibold text-cyan-100">
+                      {index + 1}
+                    </span>
+                    <span className="text-slate-100">{CHALLENGE_META[challenge]?.label ?? challenge}</span>
+                  </li>
+                ))}
+              </ol>
+              <p className="mt-3 text-xs text-slate-300">
+                Start login to begin recording. Complete each prompt in sequence.
+              </p>
+            </div>
+          )}
+
+          {isScanning && challengeStep && (
+            <div className="rounded-3xl border border-emerald-400/30 bg-slate-950/90 px-4 py-4 text-center">
+              <p className="animate-pulse text-sm font-semibold text-emerald-300">{challengeStep}</p>
+              <p className="mt-1 text-xs text-slate-300">
+                Camera is actively recording rPPG, challenge compliance, and BCG motion.
+              </p>
+            </div>
+          )}
+
+          <BiometricTelemetry isScanning={isScanning} bcgResult={bcgResult} />
+
+          <BiometricControls
+            isScanning={isScanning}
+            onEnroll={() => handleStartScan('enroll')}
+            onLogin={() => handleStartScan('login')}
+          />
+
+          {scanResult && (
+            <BiometricFeedback
+              result={scanResult}
+              message={status}
+              onClose={() => {
+                setScanResult(null);
+                setBcgResult(null);
+              }}
+            />
+          )}
         </div>
-      )}
-
-      <BiometricTelemetry isScanning={isScanning} bcgResult={bcgResult} />
-
-      <BiometricControls
-        isScanning={isScanning}
-        onEnroll={() => handleStartScan("enroll")}
-        onLogin={() => handleStartScan("login")}
-      />
-
-      {scanResult && (
-        <BiometricFeedback
-          result={scanResult}
-          message={status}
-          onClose={() => {
-            setScanResult(null);
-            setBcgResult(null);
-          }}
-        />
-      )}
+      </section>
     </div>
   );
 }
