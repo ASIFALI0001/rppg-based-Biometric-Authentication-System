@@ -7,6 +7,8 @@ __v0_jsx-dev-runtime.ts
 node_modules/
 .next/
 .env*.local
+.env
+.env.local
 .DS_Store
 # Python
 __pycache__/
