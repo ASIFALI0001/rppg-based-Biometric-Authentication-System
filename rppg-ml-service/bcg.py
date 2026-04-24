@@ -51,6 +51,7 @@ BCG_HIGH_HZ       = 3.0    # 180 BPM
 FREQ_MATCH_TOL_HZ = 0.40
 MIN_SIGNAL_POWER  = 1e-10  # Lowered so weak heartbeat motion still registers
 MIN_FRAMES        = 20     # ~0.67 s at 30 fps (eased from 30 for shorter clips)
+HARMONIC_RATIOS   = [2.0, 0.5, 3.0, 1.0/3.0]  # still checked but no longer hard-fails
 
 # ── Lucas-Kanade parameters ───────────────────────────────────────────────────
 LK_PARAMS = dict(
