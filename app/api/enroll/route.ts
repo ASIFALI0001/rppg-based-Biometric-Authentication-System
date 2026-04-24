@@ -11,6 +11,7 @@ export async function POST(request: Request) {
     const formData = await request.formData();
     const username = String(formData.get("username") ?? "").trim();
     const video = formData.get("video");
+    const forceReenroll = String(formData.get("force_reenroll") ?? "") === "true";
 
     if (!username) {
       return NextResponse.json(
@@ -23,6 +24,18 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { success: false, message: "Video file required" },
         { status: 400 }
+      );
+    }
+
+    await connectDB();
+    const existingUser = await User.findOne({ username }).lean();
+    if (existingUser && !forceReenroll) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `User '${username}' already exists. Please log in or choose a different username.`,
+        },
+        { status: 409 }
       );
     }
 
@@ -70,7 +83,6 @@ export async function POST(request: Request) {
       );
     }
 
-    await connectDB();
     await User.findOneAndUpdate(
       { username },
       {
@@ -87,7 +99,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
-      message: `Enrollment successful for ${username}. Face and vital signature stored.`,
+      message: forceReenroll
+        ? `Re-enrollment successful for ${username}. Biometric profile updated.`
+        : `Enrollment successful for ${username}. Face and vital signature stored.`,
       username,
       embeddingLength: mlData.embedding.length,
       coherence_score: mlData.coherence_score ?? 0,
