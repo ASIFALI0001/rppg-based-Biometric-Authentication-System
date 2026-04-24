@@ -176,22 +176,37 @@ def analyze_liveness(
             f"(rPPG={rppg_passes}, challenge={challenge_ok}, BCG={bcg_ok})"
         )
 
-        # Require at least 2 of 3 layers.
-        # Additionally, if a challenge was required, it MUST be one of the
-        # passing layers — BCG + rPPG cannot silently bypass a failed challenge
-        # (that gate is handled above, but this is a belt-and-suspenders check).
-        if layers_passed >= 2:
-            if challenge_was_required and not challenge_ok:
-                # This path should be unreachable (caught above), but be safe.
-                return False, coherence, "Liveness Rejected — challenge required but not confirmed"
+        # ── DECISION LOGIC ────────────────────────────────────────────────────
+        #
+        # LOGIN path (challenge_was_required=True, challenge_ok=True):
+        #   The random one-time challenge token already proves the person is live
+        #   — a pre-recorded video cannot respond to a token it has never seen.
+        #   Hard blocks (coherence > 0.90 screen-replay, < -0.50 anti-phase) are
+        #   applied above, so we do not need rPPG or BCG on top of a passed
+        #   challenge.  They are supplementary signals logged for analytics only.
+        #
+        # ENROLLMENT path (challenge_was_required=False):
+        #   challenge_ok can still be True (enrollment records blink+head_turn).
+        #   Any single passing layer is sufficient — the user is establishing a
+        #   baseline profile, not authenticating against a stored identity.
+        #
+        # If challenge was required but did not pass, we already rejected above
+        # in the MANDATORY CHALLENGE GATE, so this branch is only reached when
+        # challenge either passed or was not required.
+
+        if challenge_was_required and challenge_ok:
+            # Mandatory challenge confirmed → live person.  Pass immediately.
+            return True, coherence, (
+                f"Liveness Confirmed — challenge verified ({layers_passed}/3 layers)"
+            )
+
+        # Enrollment or no-challenge flow: require at least 1 layer.
+        if layers_passed >= 1:
             return True, coherence, f"Liveness Confirmed ({layers_passed}/3 layers)"
 
-        if layers_passed == 0:
-            return False, coherence, "No physiological signal detected"
-
         return False, coherence, (
-            f"Insufficient liveness evidence ({layers_passed}/3 layers). "
-            f"Ensure good lighting and complete all prompts."
+            "No physiological signal detected. "
+            "Ensure good lighting, face the camera, and complete all prompts."
         )
 
     except Exception as e:
