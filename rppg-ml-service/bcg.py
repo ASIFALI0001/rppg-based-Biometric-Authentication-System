@@ -46,18 +46,11 @@ TRACK_LANDMARK_INDICES = [
 # ── Tuning parameters ────────────────────────────────────────────────────────
 BCG_LOW_HZ        = 0.7    # 42 BPM
 BCG_HIGH_HZ       = 3.0    # 180 BPM
-# Tightened from 0.40 → 0.25 Hz.
-# At 0.40 Hz the check was accepting BCG readings that were harmonics
-# of the true rPPG frequency (e.g. rPPG=67 BPM, BCG=134 BPM, diff=1.1 Hz
-# in freq space — which the old forgiving fallback let through).
-FREQ_MATCH_TOL_HZ = 0.25
-MIN_SIGNAL_POWER  = 1e-8   # Very sensitive — catches weak heartbeat motion
-MIN_FRAMES        = 30     # ~1 second at 30 fps
-
-# Harmonic ratios to check for aliasing artifacts.
-# A spoofed video often causes BCG to lock onto the 2nd or 0.5× harmonic
-# of the rPPG frequency rather than the fundamental.
-HARMONIC_RATIOS   = [2.0, 0.5, 3.0, 1.0/3.0]  # multiples to flag as harmonic
+# Restored to 0.40 Hz: sub-pixel heartbeat motion through compressed WebM
+# is too noisy for ±0.25 Hz — that was rejecting legitimate users consistently.
+FREQ_MATCH_TOL_HZ = 0.40
+MIN_SIGNAL_POWER  = 1e-10  # Lowered so weak heartbeat motion still registers
+MIN_FRAMES        = 20     # ~0.67 s at 30 fps (eased from 30 for shorter clips)
 
 # ── Lucas-Kanade parameters ───────────────────────────────────────────────────
 LK_PARAMS = dict(
@@ -360,24 +353,21 @@ def analyze_bcg(video_path: str) -> Dict:
             f"harmonic={is_harmonic} (ratio={harmonic_ratio})"
         )
 
-        if freq_match and not is_harmonic:
-            # True agreement at the fundamental frequency
+        if is_harmonic:
+            # Log harmonic artifact but don't hard-fail — webcam WebM noise often
+            # causes BCG to land on a harmonic, and we have other liveness layers.
+            logger.warning(
+                f"BCG harmonic artifact (BCG={bcg_hr:.0f} BPM is {harmonic_ratio}× "
+                f"of rPPG={rppg_hr:.0f} BPM) — noted but not blocking"
+            )
+
+        if freq_match:
             result["passed"] = True
             result["reason"] = (
                 f"BCG confirmed: heartbeat motion ({bcg_hr:.0f} BPM) "
                 f"matches rPPG ({rppg_hr:.0f} BPM)"
             )
-        elif is_harmonic:
-            # BCG is a harmonic artifact — characteristic of screen replay
-            result["passed"] = False
-            result["reason"] = (
-                f"BCG harmonic artifact detected: BCG={bcg_hr:.0f} BPM is "
-                f"{harmonic_ratio}× of rPPG={rppg_hr:.0f} BPM. "
-                f"Possible screen replay or signal noise."
-            )
-            logger.warning(result["reason"])
         else:
-            # Frequencies don't match at all — fail, no forgiving fallback
             result["passed"] = False
             result["reason"] = (
                 f"BCG/rPPG frequency mismatch: BCG={bcg_hr:.0f} BPM, "

@@ -1075,10 +1075,26 @@ async def enroll_secure(file: UploadFile = File(...)):
         fps = _fps_from_signals(signals)
         bcg_result = analyze_bcg(tmp_path)
         pulse_profile = extract_pulse_signature(signals, fps=fps)
+
+        # Verify enrollment challenges — the frontend always records blink +
+        # head_turn during enrollment, so we can use them as a liveness layer.
+        # challenge_was_required=False means a failed challenge won't block
+        # enrollment outright, but a passing challenge counts as a layer.
+        enroll_challenges = ["blink", "head_turn"]
+        try:
+            challenge_result = analyze_challenges(tmp_path, enroll_challenges, fps=fps)
+            logger.info(
+                f"Enrollment challenge: passed={challenge_result.get('passed')}, "
+                f"reason={challenge_result.get('reason')}"
+            )
+        except Exception:
+            logger.warning(f"Enrollment challenge analysis error:\n{traceback.format_exc()}")
+            challenge_result = None
+
         is_real, score, reason = analyze_liveness(
             signals,
             fps=fps,
-            challenge_result=None,
+            challenge_result=challenge_result,
             bcg_result=bcg_result,
             challenge_was_required=False,
         )

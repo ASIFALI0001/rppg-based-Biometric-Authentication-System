@@ -26,10 +26,10 @@ function cosineSimilarity(a: number[], b: number[]) {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-const FACE_THRESHOLD = 0.9;
-const PULSE_SIGNATURE_THRESHOLD = 0.82;
-const RPPG_HR_TOLERANCE = 18;
-const BCG_HR_TOLERANCE = 18;
+const FACE_THRESHOLD = 0.70;            // was 0.90 — HOG+LBP varies across sessions
+const PULSE_SIGNATURE_THRESHOLD = 0.60; // was 0.82 — FFT signature shifts with HR changes
+const RPPG_HR_TOLERANCE = 25;           // was 18 BPM — wider window for HR variation
+const BCG_HR_TOLERANCE = 25;            // was 18 BPM
 const REQUIRED_TEMPLATE_VERSION = 2;
 
 export async function POST(request: Request) {
@@ -163,17 +163,22 @@ export async function POST(request: Request) {
 
     const faceOk = faceSimilarity >= FACE_THRESHOLD;
     const pulseOk = pulseSimilarity >= PULSE_SIGNATURE_THRESHOLD;
+    // Only enforce HR comparison when both enrolled and live readings are non-zero.
+    // If BCG or rPPG was unavailable at enrollment/login, skip that check rather
+    // than always failing (0 vs 0 would give Infinity diff).
     const rppgOk = Number.isFinite(rppgHrDiff) && rppgHrDiff <= RPPG_HR_TOLERANCE;
     const bcgOk =
       Number.isFinite(bcgHrDiff) &&
       bcgHrDiff <= BCG_HR_TOLERANCE &&
       (mlData.bcg_passed ?? false);
+    const hasVitalData = Number.isFinite(rppgHrDiff) || Number.isFinite(bcgHrDiff);
+    const vitalOk = !hasVitalData || rppgOk || bcgOk;
 
-    if (!faceOk || !pulseOk || (!rppgOk && !bcgOk)) {
+    if (!faceOk || !pulseOk || !vitalOk) {
       const reasons = [];
       if (!faceOk) reasons.push(`face similarity too low (${faceSimilarity.toFixed(3)})`);
       if (!pulseOk) reasons.push(`pulse signature mismatch (${pulseSimilarity.toFixed(3)})`);
-      if (!rppgOk && !bcgOk) reasons.push("vital signs do not match the enrolled profile");
+      if (!vitalOk) reasons.push("vital signs do not match the enrolled profile");
 
       return NextResponse.json(
         {

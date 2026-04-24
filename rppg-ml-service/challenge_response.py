@@ -48,17 +48,17 @@ MOUTH_LOWER     = [14, 82]
 MOUTH_LEFT      = [61, 291]
 MOUTH_RIGHT     = [39, 269]
 
-# ── Thresholds — tighter than before ─────────────────────────────────────────
-EAR_BLINK_THRESHOLD       = 0.22   # was 0.28 — require more definite closure
-EAR_OPEN_THRESHOLD        = 0.25   # was 0.30
-MIN_BLINK_DURATION_FRAMES = 2      # was 1 — avoid noise spikes
-MIN_BLINK_GAP_FRAMES      = 12     # was 10
+# ── Thresholds ───────────────────────────────────────────────────────────────
+EAR_BLINK_THRESHOLD       = 0.25   # relaxed from 0.22; catches natural blinks
+EAR_OPEN_THRESHOLD        = 0.28   # relaxed from 0.25
+MIN_BLINK_DURATION_FRAMES = 1      # relaxed from 2; single-frame dip counts
+MIN_BLINK_GAP_FRAMES      = 8      # relaxed from 12; allows faster double-blink
 
-HEAD_TURN_THRESHOLD       = 0.35   # was 0.40 — require more pronounced turn
+HEAD_TURN_THRESHOLD       = 0.40   # relaxed from 0.35; less extreme turn needed
 MAR_SMILE_THRESHOLD       = 0.55   # mouth aspect ratio for smile
 
-# Minimum video duration — still forgiving for browser recording latency
-MIN_VIDEO_DURATION = 4.0
+# Minimum video duration
+MIN_VIDEO_DURATION = 3.0           # relaxed from 4.0 s
 
 # ── Challenge pool ─────────────────────────────────────────────────────────────
 ALL_CHALLENGES = ["blink", "head_turn"]
@@ -251,8 +251,8 @@ def analyze_challenges(
         face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
+            min_detection_confidence=0.3,
+            min_tracking_confidence=0.3,
         )
     except Exception as e:
         result["reason"] = f"MediaPipe init failed: {traceback.format_exc()}"

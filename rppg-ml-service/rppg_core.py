@@ -52,6 +52,44 @@ def extract_roi_signals(video_path):
         min_tracking_confidence=0.3,
     )
 
+    # ── Quick brightness check on first few frames ───────────────────────────
+    # Reads up to 5 frames, measures mean brightness, and warns early so the
+    # caller can surface a helpful message instead of a generic "no face" error.
+    brightness_samples = []
+    for _ in range(5):
+        ret_b, frame_b = cap.read()
+        if not ret_b:
+            break
+        brightness_samples.append(float(frame_b.mean()))
+    if brightness_samples:
+        avg_brightness = sum(brightness_samples) / len(brightness_samples)
+        if avg_brightness < 40:
+            logger.warning(
+                f"Low brightness detected ({avg_brightness:.1f}/255). "
+                "Face detection will likely fail — improve lighting."
+            )
+        elif avg_brightness > 220:
+            logger.warning(
+                f"Very high brightness ({avg_brightness:.1f}/255). "
+                "Overexposure may wash out facial features."
+            )
+        else:
+            logger.info(f"Frame brightness OK: {avg_brightness:.1f}/255")
+    # Reopen the capture from the start (can't seek WebM reliably, so reopen)
+    cap.release()
+    cap = None
+    for backend in [cv2.CAP_FFMPEG, cv2.CAP_ANY]:
+        cap = cv2.VideoCapture(video_path, backend)
+        if cap.isOpened():
+            break
+    if not cap or not cap.isOpened():
+        logger.error("Could not reopen video after brightness check")
+        face_mesh.close()
+        return None, None
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0 or fps > 120:
+        fps = 30.0
+
     signals = {"forehead": [], "left_cheek": [], "right_cheek": []}
     first_frame    = None   # set to first frame where a face IS confirmed
     frame_count    = 0

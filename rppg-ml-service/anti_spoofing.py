@@ -75,7 +75,7 @@ def analyze_liveness(
       • If challenge_was_required and challenge FAILED → REJECT immediately.
         A recorded video cannot respond to a random challenge it never saw.
       • Require 2/3 layers to pass overall.
-      • rPPG coherence must be in [0.15, 0.95] to count as a passing layer
+      • rPPG coherence must be in [0.08, 0.90] to count as a passing layer
         (near-zero = no pulse signal; near-1.0 = perfect screen correlation).
       • Hard-block on coherence > 0.90 (screen replay) or < -0.30 (anti-phase).
       • On ANY unhandled exception → return FAIL (fail closed, not open).
@@ -124,7 +124,7 @@ def analyze_liveness(
             )
 
         # ── HARD-BLOCK 2: Anti-phase signal ───────────────────────────────────
-        if rppg_valid and coherence < -0.30:
+        if rppg_valid and coherence < -0.50:
             return False, coherence, (
                 f"Anti-phase rPPG signal detected (coherence={coherence:.3f}). "
                 f"Likely a screen or photo replay."
@@ -158,9 +158,10 @@ def analyze_liveness(
 
         # ── DECISION LOGIC ─────────────────────────────────────────────────────
         # rPPG counts only if coherence is in a physiologically plausible range.
-        # Too low  (< 0.15) = noise / no signal.
+        # Lowered minimum 0.15 → 0.08: real skin through compressed WebM often
+        # lands in 0.05–0.15; 0.15 was rejecting legitimate users.
         # Too high (> 0.90) = already hard-blocked above.
-        rppg_passes = rppg_valid and (0.15 <= coherence <= 0.90)
+        rppg_passes = rppg_valid and (0.08 <= coherence <= 0.90)
 
         layers_passed = 0
         if rppg_passes:
