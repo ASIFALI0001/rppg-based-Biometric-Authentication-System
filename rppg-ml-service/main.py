@@ -4,7 +4,7 @@ import logging
 import traceback
 import tempfile
 import sqlite3
-from typing import Optional, List
+from typing import Optional, List, Dict
 import cv2
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form
@@ -170,6 +170,188 @@ def _fps_from_signals(signals, default: float = 30.0) -> float:
         if isinstance(fps, (int, float)) and 5 < fps <= 120:
             return float(fps)
     return default
+
+EMBED_CROP = (128, 128)
+
+def _haar_crop_advanced(bgr: np.ndarray, size=EMBED_CROP) -> Optional[np.ndarray]:
+    gray = cv2.equalizeHist(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY))
+    for scale, nb, msz in [(1.1, 4, (50, 50)), (1.05, 2, (30, 30))]:
+        faces = _haar.detectMultiScale(gray, scale, nb, minSize=msz)
+        if len(faces):
+            x, y, w, h = max(faces, key=lambda r: r[2] * r[3])
+            raw = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            return cv2.resize(raw[y:y + h, x:x + w], size)
+    return None
+
+def _mp_crop_advanced(bgr: np.ndarray, size=EMBED_CROP) -> Optional[np.ndarray]:
+    try:
+        import mediapipe as mp
+        fm = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=True, max_num_faces=1, min_detection_confidence=0.3
+        )
+        res = fm.process(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        fm.close()
+        if not res.multi_face_landmarks:
+            return None
+        h, w = bgr.shape[:2]
+        lms = res.multi_face_landmarks[0].landmark
+        xs = [int(lm.x * w) for lm in lms]
+        ys = [int(lm.y * h) for lm in lms]
+        x1, x2 = max(0, min(xs) - 10), min(w, max(xs) + 10)
+        y1, y2 = max(0, min(ys) - 10), min(h, max(ys) + 10)
+        crop = bgr[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+        return cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), size)
+    except Exception:
+        logger.error(f"MediaPipe advanced crop failed:\n{traceback.format_exc()}")
+        return None
+
+def _compute_lbp_descriptor(gray: np.ndarray, grid: int = 4) -> np.ndarray:
+    gray = gray.astype(np.uint8)
+    center = gray[1:-1, 1:-1]
+    if center.size == 0:
+        return np.zeros(grid * grid * 16, dtype=np.float32)
+
+    lbp = np.zeros_like(center, dtype=np.uint8)
+    offsets = [
+        (-1, -1), (-1, 0), (-1, 1), (0, 1),
+        (1, 1), (1, 0), (1, -1), (0, -1),
+    ]
+    h, w = center.shape
+    for bit, (dy, dx) in enumerate(offsets):
+        neighbor = gray[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
+        lbp |= ((neighbor >= center).astype(np.uint8) << bit)
+
+    descriptor = []
+    for gy in range(grid):
+        for gx in range(grid):
+            y1 = gy * h // grid
+            y2 = (gy + 1) * h // grid
+            x1 = gx * w // grid
+            x2 = (gx + 1) * w // grid
+            block = (lbp[y1:y2, x1:x2] >> 4).ravel()
+            hist, _ = np.histogram(block, bins=16, range=(0, 16))
+            hist = hist.astype(np.float32)
+            hist /= (hist.sum() + 1e-6)
+            descriptor.append(hist)
+
+    return np.concatenate(descriptor).astype(np.float32)
+
+def extract_embedding(bgr: np.ndarray) -> Optional[List[float]]:
+    if bgr is None:
+        return None
+
+    crop = _haar_crop_advanced(bgr)
+    if crop is None:
+        crop = _mp_crop_advanced(bgr)
+    if crop is None:
+        logger.warning("No face detected - cannot extract embedding")
+        return None
+
+    crop = cv2.equalizeHist(cv2.resize(crop, EMBED_CROP))
+    hog = cv2.HOGDescriptor(
+        _winSize=EMBED_CROP,
+        _blockSize=(32, 32),
+        _blockStride=(16, 16),
+        _cellSize=(16, 16),
+        _nbins=9,
+    )
+    hog_desc = hog.compute(crop).flatten().astype(np.float32)
+    lbp_desc = _compute_lbp_descriptor(crop)
+    descriptor = np.concatenate([hog_desc, lbp_desc]).astype(np.float32)
+    norm = np.linalg.norm(descriptor)
+    if norm > 0:
+        descriptor /= norm
+    emb = descriptor.tolist()
+    logger.info(f"Advanced embedding extracted: {len(emb)} values")
+    return emb
+
+def extract_video_embedding(video_path: str, max_samples: int = 7) -> Optional[List[float]]:
+    cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
+    if not cap.isOpened():
+        cap = cv2.VideoCapture(video_path, cv2.CAP_ANY)
+    if not cap.isOpened():
+        logger.warning(f"Could not open video for embedding extraction: {video_path}")
+        return None
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    sample_points = (
+        set(np.linspace(0, max(total_frames - 1, 0), num=max_samples, dtype=int).tolist())
+        if total_frames > 0 else set()
+    )
+
+    descriptors = []
+    frame_index = 0
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if not sample_points or frame_index in sample_points:
+            emb = extract_embedding(frame)
+            if emb is not None:
+                descriptors.append(np.array(emb, dtype=np.float32))
+                if len(descriptors) >= max_samples:
+                    break
+        frame_index += 1
+
+    cap.release()
+
+    if not descriptors:
+        return None
+
+    mean_emb = np.vstack(descriptors).mean(axis=0)
+    norm = np.linalg.norm(mean_emb)
+    if norm > 0:
+        mean_emb /= norm
+    logger.info(f"Video embedding extracted from {len(descriptors)} frame(s)")
+    return mean_emb.astype(np.float32).tolist()
+
+def extract_pulse_signature(signals, fps: float = 30.0, bins: int = 32) -> Dict:
+    empty = {"pulse_signature": [], "rppg_hr_bpm": 0.0, "pulse_signal_strength": 0.0}
+    if not signals or not isinstance(signals, dict):
+        return empty
+
+    traces = []
+    for roi in ("forehead", "left_cheek", "right_cheek"):
+        arr = signals.get(roi)
+        if isinstance(arr, np.ndarray) and arr.ndim == 2 and arr.shape[0] > 20 and arr.shape[1] >= 2:
+            traces.append(arr[:, 1].astype(np.float32))
+
+    if not traces:
+        return empty
+
+    min_len = min(len(t) for t in traces)
+    if min_len < 20:
+        return empty
+
+    trace = np.mean(np.vstack([t[:min_len] for t in traces]), axis=0)
+    trace = trace - np.mean(trace)
+    if np.std(trace) < 1e-6:
+        return empty
+
+    window = np.hanning(len(trace))
+    fft = np.abs(np.fft.rfft(trace * window))
+    freqs = np.fft.rfftfreq(len(trace), d=1.0 / fps)
+    mask = (freqs >= 0.7) & (freqs <= 3.0)
+    if not np.any(mask):
+        return empty
+
+    band_freqs = freqs[mask]
+    band_fft = fft[mask]
+    peak_idx = int(np.argmax(band_fft))
+    hr_bpm = float(band_freqs[peak_idx] * 60.0)
+    target_freqs = np.linspace(0.7, 3.0, bins)
+    signature = np.interp(target_freqs, band_freqs, band_fft).astype(np.float32)
+    norm = np.linalg.norm(signature)
+    if norm > 0:
+        signature /= norm
+
+    return {
+        "pulse_signature": signature.tolist(),
+        "rppg_hr_bpm": hr_bpm,
+        "pulse_signal_strength": float(np.var(trace)),
+    }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Startup event
@@ -857,6 +1039,239 @@ async def debug_check_frame(video: UploadFile = File(...)):
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+@app.post("/api/ml/enroll-secure")
+async def enroll_secure(file: UploadFile = File(...)):
+    tmp_path = None
+    try:
+        data = await file.read()
+        if not data:
+            return JSONResponse(status_code=400, content={
+                "success": False,
+                "spoof_reason": "Empty video file",
+                "embedding": [],
+                "pulse_signature": [],
+                "coherence_score": 0.0,
+            })
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm",
+                                         dir=tempfile.gettempdir()) as f:
+            f.write(data)
+            tmp_path = f.name
+
+        signals, frame = extract_roi_signals(tmp_path)
+        if frame is None or signals is None:
+            return JSONResponse(status_code=400, content={
+                "success": False,
+                "spoof_reason": "No live face and pulse signal detected in the video",
+                "embedding": [],
+                "pulse_signature": [],
+                "coherence_score": 0.0,
+            })
+
+        fps = _fps_from_signals(signals)
+        bcg_result = analyze_bcg(tmp_path)
+        pulse_profile = extract_pulse_signature(signals, fps=fps)
+        is_real, score, reason = analyze_liveness(
+            signals,
+            fps=fps,
+            challenge_result=None,
+            bcg_result=bcg_result,
+            challenge_was_required=False,
+        )
+
+        if not is_real:
+            return JSONResponse(status_code=401, content={
+                "success": False,
+                "spoof_reason": reason,
+                "embedding": [],
+                "pulse_signature": [],
+                "coherence_score": round(score, 4),
+                "rppg_hr_bpm": pulse_profile.get("rppg_hr_bpm", 0.0),
+                "bcg_hr_bpm": bcg_result.get("bcg_hr_bpm", 0.0),
+                "bcg_signal_power": bcg_result.get("bcg_signal_power", 0.0),
+            })
+
+        emb = extract_video_embedding(tmp_path) or extract_embedding(frame)
+        if emb is None or not pulse_profile.get("pulse_signature"):
+            return JSONResponse(status_code=400, content={
+                "success": False,
+                "spoof_reason": "Could not extract a stable face and pulse template",
+                "embedding": [],
+                "pulse_signature": [],
+                "coherence_score": round(score, 4),
+            })
+
+        return {
+            "success": True,
+            "embedding": emb,
+            "pulse_signature": pulse_profile.get("pulse_signature", []),
+            "rppg_hr_bpm": pulse_profile.get("rppg_hr_bpm", 0.0),
+            "pulse_signal_strength": pulse_profile.get("pulse_signal_strength", 0.0),
+            "bcg_hr_bpm": bcg_result.get("bcg_hr_bpm", 0.0),
+            "bcg_signal_power": bcg_result.get("bcg_signal_power", 0.0),
+            "coherence_score": round(score, 4),
+            "spoof_reason": reason,
+        }
+    except Exception:
+        logger.error(traceback.format_exc())
+        return JSONResponse(status_code=500, content={
+            "success": False,
+            "spoof_reason": f"Server error: {traceback.format_exc()}",
+            "embedding": [],
+            "pulse_signature": [],
+            "coherence_score": 0.0,
+        })
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                time.sleep(0.05)
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+@app.post("/api/ml/verify-secure")
+async def verify_secure(
+    file: UploadFile = File(...),
+    challenges: str = Form(default="blink,head_turn"),
+    challenge_token: str = Form(default="")
+):
+    tmp_path = None
+    try:
+        required = [c.strip().lower() for c in challenges.split(",") if c.strip()]
+        if challenge_token.strip():
+            token_required = consume_challenge_token(challenge_token.strip())
+            if token_required is None:
+                return JSONResponse(status_code=401, content={
+                    "success": False,
+                    "spoof_reason": "Invalid or expired challenge token",
+                    "embedding": [],
+                    "pulse_signature": [],
+                    "coherence_score": 0.0,
+                    "challenge_passed": False,
+                    "bcg_passed": False,
+                    "bcg_hr_bpm": 0.0,
+                    "rppg_hr_bpm": 0.0,
+                    "bcg_signal_power": 0.0,
+                })
+            required = token_required
+
+        data = await file.read()
+        if not data:
+            return JSONResponse(status_code=400, content={
+                "success": False,
+                "spoof_reason": "Empty video file",
+                "embedding": [],
+                "pulse_signature": [],
+                "coherence_score": 0.0,
+                "challenge_passed": False,
+                "bcg_passed": False,
+                "bcg_hr_bpm": 0.0,
+                "rppg_hr_bpm": 0.0,
+                "bcg_signal_power": 0.0,
+            })
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm",
+                                         dir=tempfile.gettempdir()) as f:
+            f.write(data)
+            tmp_path = f.name
+
+        signals, frame = extract_roi_signals(tmp_path)
+        if frame is None or signals is None:
+            return JSONResponse(status_code=400, content={
+                "success": False,
+                "spoof_reason": "No live face and pulse signal detected in the video",
+                "embedding": [],
+                "pulse_signature": [],
+                "coherence_score": 0.0,
+                "challenge_passed": False,
+                "bcg_passed": False,
+                "bcg_hr_bpm": 0.0,
+                "rppg_hr_bpm": 0.0,
+                "bcg_signal_power": 0.0,
+            })
+
+        fps = _fps_from_signals(signals)
+        challenge_result = analyze_challenges(tmp_path, required, fps=fps) if required else None
+        bcg_result = analyze_bcg(tmp_path)
+        pulse_profile = extract_pulse_signature(signals, fps=fps)
+        is_real, score, reason = analyze_liveness(
+            signals,
+            fps=fps,
+            challenge_result=challenge_result,
+            bcg_result=bcg_result,
+            challenge_was_required=True,
+        )
+
+        if not is_real:
+            return JSONResponse(status_code=401, content={
+                "success": False,
+                "spoof_reason": reason,
+                "embedding": [],
+                "pulse_signature": [],
+                "coherence_score": round(score, 4),
+                "challenge_passed": challenge_result.get("passed", False) if challenge_result else False,
+                "challenge_details": challenge_result.get("details", {}) if challenge_result else {},
+                "bcg_passed": bcg_result.get("passed", False),
+                "bcg_hr_bpm": bcg_result.get("bcg_hr_bpm", 0.0),
+                "rppg_hr_bpm": pulse_profile.get("rppg_hr_bpm", 0.0),
+                "bcg_signal_power": bcg_result.get("bcg_signal_power", 0.0),
+                "bcg_freq_match": bcg_result.get("freq_match", False),
+            })
+
+        emb = extract_video_embedding(tmp_path) or extract_embedding(frame)
+        if emb is None or not pulse_profile.get("pulse_signature"):
+            return JSONResponse(status_code=400, content={
+                "success": False,
+                "spoof_reason": "Could not extract a stable face and pulse template",
+                "embedding": [],
+                "pulse_signature": [],
+                "coherence_score": round(score, 4),
+                "challenge_passed": challenge_result.get("passed", False) if challenge_result else False,
+                "challenge_details": challenge_result.get("details", {}) if challenge_result else {},
+                "bcg_passed": bcg_result.get("passed", False),
+                "bcg_hr_bpm": bcg_result.get("bcg_hr_bpm", 0.0),
+                "rppg_hr_bpm": pulse_profile.get("rppg_hr_bpm", 0.0),
+                "bcg_signal_power": bcg_result.get("bcg_signal_power", 0.0),
+                "bcg_freq_match": bcg_result.get("freq_match", False),
+            })
+
+        return {
+            "success": True,
+            "embedding": emb,
+            "pulse_signature": pulse_profile.get("pulse_signature", []),
+            "rppg_hr_bpm": pulse_profile.get("rppg_hr_bpm", 0.0),
+            "pulse_signal_strength": pulse_profile.get("pulse_signal_strength", 0.0),
+            "coherence_score": round(score, 4),
+            "spoof_reason": reason,
+            "challenge_passed": challenge_result.get("passed", False) if challenge_result else False,
+            "challenge_details": challenge_result.get("details", {}) if challenge_result else {},
+            "bcg_passed": bcg_result.get("passed", False),
+            "bcg_hr_bpm": bcg_result.get("bcg_hr_bpm", 0.0),
+            "bcg_signal_power": bcg_result.get("bcg_signal_power", 0.0),
+            "bcg_freq_match": bcg_result.get("freq_match", False),
+        }
+    except Exception:
+        logger.error(traceback.format_exc())
+        return JSONResponse(status_code=500, content={
+            "success": False,
+            "spoof_reason": f"Server error: {traceback.format_exc()}",
+            "embedding": [],
+            "pulse_signature": [],
+            "coherence_score": 0.0,
+            "challenge_passed": False,
+            "bcg_passed": False,
+            "bcg_hr_bpm": 0.0,
+            "rppg_hr_bpm": 0.0,
+            "bcg_signal_power": 0.0,
+        })
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                time.sleep(0.05)
                 os.remove(tmp_path)
             except Exception:
                 pass

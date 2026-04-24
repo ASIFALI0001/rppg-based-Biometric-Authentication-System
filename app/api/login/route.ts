@@ -26,7 +26,11 @@ function cosineSimilarity(a: number[], b: number[]) {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-const SIMILARITY_THRESHOLD = 0.75;
+const FACE_THRESHOLD = 0.9;
+const PULSE_SIGNATURE_THRESHOLD = 0.82;
+const RPPG_HR_TOLERANCE = 18;
+const BCG_HR_TOLERANCE = 18;
+const REQUIRED_TEMPLATE_VERSION = 2;
 
 export async function POST(request: Request) {
   try {
@@ -69,11 +73,27 @@ export async function POST(request: Request) {
       );
     }
 
+    if (
+      (user.templateVersion ?? 1) < REQUIRED_TEMPLATE_VERSION ||
+      !Array.isArray(user.faceEmbedding) ||
+      !Array.isArray(user.pulseSignature) ||
+      user.pulseSignature.length === 0
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "This account was enrolled with an older insecure template. Please re-enroll using a fresh live video.",
+        },
+        { status: 409 }
+      );
+    }
+
     const pythonForm = new FormData();
     pythonForm.append("file", video, video.name || "rppg_sample.webm");
     pythonForm.append("challenge_token", challengeToken);
 
-    const mlResponse = await fetch(getMLServiceUrl("/api/ml/analyze-full"), {
+    const mlResponse = await fetch(getMLServiceUrl("/api/ml/verify-secure"), {
       method: "POST",
       body: pythonForm,
       cache: "no-store",
@@ -108,21 +128,65 @@ export async function POST(request: Request) {
       );
     }
 
-    const similarity = cosineSimilarity(
-      user.embedding as number[],
+    if (
+      !Array.isArray(mlData.pulse_signature) ||
+      mlData.pulse_signature.length === 0
+    ) {
+      return NextResponse.json(
+        { success: false, message: "ML service did not return a pulse signature" },
+        { status: 500 }
+      );
+    }
+
+    const faceSimilarity = cosineSimilarity(
+      user.faceEmbedding as number[],
       mlData.embedding as number[]
     );
 
-    if (similarity < SIMILARITY_THRESHOLD) {
+    const pulseSimilarity = cosineSimilarity(
+      user.pulseSignature as number[],
+      mlData.pulse_signature as number[]
+    );
+
+    const storedRppgHr = Number(user.rppgHrBpm ?? 0);
+    const storedBcgHr = Number(user.bcgHrBpm ?? 0);
+    const loginRppgHr = Number(mlData.rppg_hr_bpm ?? 0);
+    const loginBcgHr = Number(mlData.bcg_hr_bpm ?? 0);
+    const rppgHrDiff =
+      storedRppgHr > 0 && loginRppgHr > 0
+        ? Math.abs(storedRppgHr - loginRppgHr)
+        : Number.POSITIVE_INFINITY;
+    const bcgHrDiff =
+      storedBcgHr > 0 && loginBcgHr > 0
+        ? Math.abs(storedBcgHr - loginBcgHr)
+        : Number.POSITIVE_INFINITY;
+
+    const faceOk = faceSimilarity >= FACE_THRESHOLD;
+    const pulseOk = pulseSimilarity >= PULSE_SIGNATURE_THRESHOLD;
+    const rppgOk = Number.isFinite(rppgHrDiff) && rppgHrDiff <= RPPG_HR_TOLERANCE;
+    const bcgOk =
+      Number.isFinite(bcgHrDiff) &&
+      bcgHrDiff <= BCG_HR_TOLERANCE &&
+      (mlData.bcg_passed ?? false);
+
+    if (!faceOk || !pulseOk || (!rppgOk && !bcgOk)) {
+      const reasons = [];
+      if (!faceOk) reasons.push(`face similarity too low (${faceSimilarity.toFixed(3)})`);
+      if (!pulseOk) reasons.push(`pulse signature mismatch (${pulseSimilarity.toFixed(3)})`);
+      if (!rppgOk && !bcgOk) reasons.push("vital signs do not match the enrolled profile");
+
       return NextResponse.json(
         {
           success: false,
-          message: `Face mismatch (similarity=${similarity.toFixed(2)})`,
-          face_similarity: Number(similarity.toFixed(4)),
+          message: `Identity mismatch: ${reasons.join("; ")}`,
+          face_similarity: Number(faceSimilarity.toFixed(4)),
+          pulse_similarity: Number(pulseSimilarity.toFixed(4)),
+          rppg_hr_diff: Number.isFinite(rppgHrDiff) ? Number(rppgHrDiff.toFixed(1)) : null,
+          bcg_hr_diff: Number.isFinite(bcgHrDiff) ? Number(bcgHrDiff.toFixed(1)) : null,
           challenge_passed: mlData.challenge_passed ?? false,
           bcg_passed: mlData.bcg_passed ?? false,
-          bcg_hr_bpm: mlData.bcg_hr_bpm ?? 0,
-          rppg_hr_bpm: mlData.rppg_hr_bpm ?? 0,
+          bcg_hr_bpm: loginBcgHr,
+          rppg_hr_bpm: loginRppgHr,
           bcg_signal_power: mlData.bcg_signal_power ?? 0,
           coherence_score: mlData.coherence_score ?? 0,
           bcg_freq_match: mlData.bcg_freq_match ?? false,
@@ -133,9 +197,12 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
-      message: `Welcome ${username}! Liveness verified.`,
+      message: `Welcome ${username}! Face and vital signature verified.`,
       username,
-      face_similarity: Number(similarity.toFixed(4)),
+      face_similarity: Number(faceSimilarity.toFixed(4)),
+      pulse_similarity: Number(pulseSimilarity.toFixed(4)),
+      rppg_hr_diff: Number.isFinite(rppgHrDiff) ? Number(rppgHrDiff.toFixed(1)) : null,
+      bcg_hr_diff: Number.isFinite(bcgHrDiff) ? Number(bcgHrDiff.toFixed(1)) : null,
       challenge_passed: mlData.challenge_passed ?? false,
       bcg_passed: mlData.bcg_passed ?? false,
       bcg_hr_bpm: mlData.bcg_hr_bpm ?? 0,
