@@ -11,11 +11,11 @@ interface ControlsProps {
 
 export default function BiometricControls({ isScanning, onEnroll, onLogin }: ControlsProps) {
   return (
-    <div className="mt-2 flex w-full flex-col justify-center gap-3 sm:flex-row">
+    <div className="mt-2 grid w-full grid-cols-1 gap-3 sm:flex sm:flex-row sm:justify-center">
       <Button 
         onClick={onEnroll} 
         disabled={isScanning}
-        className={`w-full max-w-[160px] transition-all ${
+        className={`h-12 w-full transition-all sm:max-w-[190px] ${
           isScanning ? "cursor-not-allowed bg-slate-700/70 text-slate-300" : "border border-cyan-300/20 bg-cyan-500/90 text-slate-950 shadow-[0_10px_30px_rgba(34,211,238,0.22)] hover:bg-cyan-400"
         }`}
       >
@@ -26,7 +26,7 @@ export default function BiometricControls({ isScanning, onEnroll, onLogin }: Con
       <Button 
         onClick={onLogin} 
         disabled={isScanning}
-        className={`w-full max-w-[160px] transition-all ${
+        className={`h-12 w-full transition-all sm:max-w-[190px] ${
           isScanning ? "cursor-not-allowed bg-slate-700/70 text-slate-300" : "border border-emerald-300/20 bg-emerald-400 text-slate-950 shadow-[0_10px_30px_rgba(74,222,128,0.2)] hover:bg-emerald-300"
         }`}
       >

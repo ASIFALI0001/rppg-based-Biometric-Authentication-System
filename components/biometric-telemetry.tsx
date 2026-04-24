@@ -77,11 +77,11 @@ export function BiometricTelemetry({ isScanning, bcgResult }: BiometricTelemetry
     && (bcgResult!.challenge_passed === true || bcgResult!.challenge_passed === false);
 
   return (
-    <div className="w-full space-y-4 rounded-[28px] border border-slate-700/70 bg-slate-950/85 p-5 font-mono text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+    <div className="w-full space-y-4 rounded-[28px] border border-slate-700/70 bg-slate-950/85 p-4 font-mono text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] sm:p-5">
 
       {/* ── Row 1: Heart Rate (BCG + rPPG) ── */}
       {(hasBcgData || isScanning) && (
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <p className="mb-1 text-xs uppercase tracking-wider text-slate-400">
               BCG Heart Rate
@@ -134,7 +134,7 @@ export function BiometricTelemetry({ isScanning, bcgResult }: BiometricTelemetry
       )}
 
       {/* ── Row 2: Liveness layers ── */}
-      <div className="grid grid-cols-3 gap-4 border-t border-slate-700/70 pt-4">
+      <div className="grid grid-cols-3 gap-3 border-t border-slate-700/70 pt-4 sm:gap-4">
 
         {/* rPPG coherence */}
         <div>

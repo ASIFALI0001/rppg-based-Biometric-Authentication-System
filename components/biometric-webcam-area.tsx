@@ -40,7 +40,7 @@ export default function BiometricWebcamArea({ videoRef, status, setStatus }: Web
   }, [videoRef, setStatus]);
 
   return (
-    <div className="relative w-full aspect-video overflow-hidden rounded-[28px] border border-slate-700/70 bg-slate-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_12px_50px_rgba(0,0,0,0.35)]">
+    <div className="relative w-full min-h-[25rem] overflow-hidden rounded-[28px] border border-slate-700/70 bg-slate-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_12px_50px_rgba(0,0,0,0.35)] sm:min-h-[28rem] lg:min-h-0 lg:aspect-video">
       {/* The actual video feed */}
       <video
         ref={videoRef as any}
@@ -56,12 +56,12 @@ export default function BiometricWebcamArea({ videoRef, status, setStatus }: Web
 
       {/* Dashed alignment box overlay */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-        <div className="h-64 w-48 rounded-full border border-dashed border-emerald-300/45 shadow-[0_0_60px_rgba(45,212,191,0.1)]" />
+        <div className="h-[18rem] w-[13rem] rounded-[999px] border border-dashed border-emerald-300/45 shadow-[0_0_60px_rgba(45,212,191,0.1)] sm:h-80 sm:w-56 lg:h-64 lg:w-48" />
       </div>
 
       {/* Status Text Overlay */}
-      <div className="absolute bottom-4 left-0 right-0 text-center pointer-events-none">
-        <span className="rounded-full border border-emerald-300/20 bg-slate-950/92 px-4 py-2 font-mono text-sm text-emerald-300 backdrop-blur-md">
+      <div className="absolute bottom-4 left-3 right-3 text-center pointer-events-none sm:left-0 sm:right-0">
+        <span className="inline-flex max-w-full rounded-full border border-emerald-300/20 bg-slate-950/92 px-4 py-2 text-center font-mono text-xs text-emerald-300 backdrop-blur-md sm:text-sm">
           {status}
         </span>
       </div>

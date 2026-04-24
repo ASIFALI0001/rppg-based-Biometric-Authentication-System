@@ -12,7 +12,7 @@ export function BiometricHeader() {
             <Sparkles className="h-3.5 w-3.5" />
             VitalSign ID
           </div>
-          <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+          <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl lg:text-4xl">
             Passive pulse biometrics with active liveness proof
           </h1>
         </div>
